@@ -9,7 +9,7 @@ Created as a portfolio piece to demonstrate data‑engineering, modelling, and p
 
 * **Why wind generation?** Accurate day‑ahead output forecasts feed directly into supply–demand balances, margin calculations and price formation—core themes for Argus Consulting.
 * **Outcome‑oriented:** The repo shows an end‑to‑end pipeline: ingest → feature engineering → model training → dashboard.
-* **Tech stack demo:** Python • pandas • CatBoost • Plotly Dash • GitHub Actions – wrapped in an agentic GPT‑4.1‑driven workflow.
+* **Tech stack demo:** Python • pandas • CatBoost • Plotly Dash • GitHub Actions
 
 ---
 
