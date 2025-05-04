@@ -132,12 +132,13 @@ wind-forecast-dashboard/
 * Average feature importance logged.
 * *Status: Completed*
 
-**Phase 4 (Dashboard) –** `dashboard/app.py`
-* Basic structure with KPI cards and forecast plot.
-* Added Dash Bootstrap Components (DBC) and themes.
-* Implemented light/dark theme switching (ThemeSwitchAIO).
-* Added Error Distribution plot tab.
-* Polished UI: responsive layout, card styling, tooltips, number formatting.
+**Phase 4 (Dashboard Refactor) –** `dashboard/app.py`
+* Major code refactor (Jul 2024): modularised components, helper functions for data loading & styling, cleaner layout.
+* Fixed previous bugs: prediction trace rendering, empty histogram, theme font-size consistency.
+* Implemented robust data slicing/merging within the callback.
+* Added KPI card tooltips showing relative improvement vs baseline.
+* Standardised on UTC timezone handling.
+* Hid Dash debug UI inspector (due to upstream label bug).
 * *Status: Completed*
 
 ---

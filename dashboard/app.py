@@ -1,310 +1,243 @@
-# Dash 3.0.4 bug: debug graph "top‑down" / "left‑right" labels swapped
-import json
-import pandas as pd
-import numpy as np
+"""
+dashboard/app.py
+Clean, end‑to‑end version – May 2025
+------------------------------------
+• Light/dark theme toggle (Minty / Cyborg)
+• KPI cards with tool‑tips
+• Forecast + Error‑distribution tabs
+• Robust date / series filtering
+"""
+
+import os, json
 from pathlib import Path
-from dash import Dash, dcc, html, Input, Output, State, ctx, exceptions
+
+import numpy as np
+import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+from dash import Dash, dcc, html, Input, Output, exceptions
 import dash_bootstrap_components as dbc
 from dash_bootstrap_templates import ThemeSwitchAIO, load_figure_template
+import uuid   
+# -----------------------------------------------------------------------------
+#  Paths & constants
+# -----------------------------------------------------------------------------
+ROOT            = Path(__file__).resolve().parents[1]
+FEATURES_PATH   = ROOT / "data" / "features" / "features.parquet"
+PRED_PATH       = ROOT / "data" / "predictions" / "catboost_test.parquet"
+METRICS_PATH    = ROOT / "metrics.json"
 
-# --- Constants & Theme Definitions ---
-PROJECT_ROOT = Path(__file__).parents[1]
-FEATURES_PATH = PROJECT_ROOT / "data" / "features" / "features.parquet"
-PREDICTIONS_PATH = PROJECT_ROOT / "data" / "predictions" / "catboost_test.parquet"
-METRICS_PATH = PROJECT_ROOT / "metrics.json"
+THEME_LIGHT     = "minty"   # template name
+THEME_DARK      = "cyborg"
+CSS_LIGHT       = dbc.themes.MINTY
+CSS_DARK        = dbc.themes.CYBORG
 
-# Themes for ThemeSwitchAIO
-template_theme1 = "minty" # Light theme
-template_theme2 = "cyborg" # Dark theme
-url_theme1 = dbc.themes.MINTY
-url_theme2 = dbc.themes.CYBORG
+# Hide the Dash debug‑inspector dropdown
+os.environ["DASH_DEBUG_UI"] = "false"
 
-# --- Load Data Outside Callbacks (Read-only) ---
-try:
-    with open(METRICS_PATH) as f:
-        metrics = json.load(f)
-    baseline = metrics.get("baseline", {})
-    catboost = metrics.get("catboost", {})
-except FileNotFoundError:
-    baseline = {"rmse": np.nan, "mape": np.nan}
-    catboost = {"rmse": np.nan, "mape": np.nan}
+# -----------------------------------------------------------------------------
+#  Load static artefacts (metrics)
+# -----------------------------------------------------------------------------
+def safe_load_json(path: Path, default: dict) -> dict:
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return default
 
-try:
-    features_df = pd.read_parquet(FEATURES_PATH)
-    features_df["datetime"] = pd.to_datetime(features_df["datetime"])
-    # Determine split date for test set identification
-    split_fraction = 0.75
-    split_index = int(len(features_df) * split_fraction)
-    split_date = features_df['datetime'].iloc[split_index]
-    min_date = features_df['datetime'].min().date()
-    max_date = features_df['datetime'].max().date()
+metrics   = safe_load_json(METRICS_PATH, {})
+baseline  = metrics.get("baseline",  {"rmse": np.nan, "mape": np.nan})
+catboost  = metrics.get("catboost",  {"rmse": np.nan, "mape": np.nan})
 
-    # Separate test features now
-    test_features_df = features_df[features_df["datetime"] >= split_date].copy()
+# -----------------------------------------------------------------------------
+#  Load raw data
+# -----------------------------------------------------------------------------
+def load_parquet(path: Path, cols: list[str]) -> pd.DataFrame:
+    if path.exists():
+        df = pd.read_parquet(path, columns=cols)
+        df["datetime"] = pd.to_datetime(df["datetime"], utc=True)
+        return df
+    return pd.DataFrame(columns=["datetime", *cols[1:]])
 
-except FileNotFoundError:
-    test_features_df = pd.DataFrame() # Handle case where features are missing
-    min_date = pd.Timestamp('today').date() - pd.Timedelta(days=30) # Default range if no data
-    max_date = pd.Timestamp('today').date()
+features_full = load_parquet(FEATURES_PATH,
+                             ["datetime", "wind_mw", "wind_mw_lag_48h"])
+preds_full    = load_parquet(PRED_PATH,
+                             ["datetime", "wind_mw_pred"])
 
+# restrict to test‑set fraction (as in training script)
+if not features_full.empty:
+    cut = int(len(features_full) * 0.75)
+    test_feats = features_full.iloc[cut:].copy()
+    min_d, max_d = test_feats["datetime"].dt.date.min(), test_feats["datetime"].dt.date.max()
+else:
+    test_feats = features_full.copy()
+    today  = pd.Timestamp.utcnow().date()
+    min_d, max_d = today, today
 
-try:
-    preds_df = pd.read_parquet(PREDICTIONS_PATH)
-    preds_df["datetime"] = pd.to_datetime(preds_df["datetime"])
-    # Merge predictions onto test features
-    plot_data_df = pd.merge(test_features_df, preds_df, on="datetime", how="left")
-except FileNotFoundError:
-    plot_data_df = test_features_df.copy()
-    plot_data_df['wind_mw_pred'] = np.nan # Ensure column exists
+# -----------------------------------------------------------------------------
+#  Helper – KPI card colour / icon
+# -----------------------------------------------------------------------------
+def kpi_colour_icon(value, base, lower_better=True):
+    if np.isnan(value) or np.isnan(base):
+        return "secondary", ""
+    better = value < base if lower_better else value > base
+    worse  = value > base if lower_better else value < base
+    if better:
+        return "success", "↓" if lower_better else "↑"
+    if worse:
+        return "danger",  "↑" if lower_better else "↓"
+    return "warning", "="
 
+# -----------------------------------------------------------------------------
+#  Dash app
+# -----------------------------------------------------------------------------
+load_figure_template(THEME_LIGHT)
+app = Dash(__name__, external_stylesheets=[CSS_LIGHT])
+app.title = "GB Wind Forecast Dashboard"
 
-# --- Helper Functions for Styling ---
-def get_kpi_style(metric_value, baseline_value, lower_is_better=True):
-    style = {} # Basic style handled by dbc.Card
-    if pd.isna(metric_value) or pd.isna(baseline_value):
-         return "secondary", "" # Return color string for dbc.Card
+# -- KPI cards ---------------------------------------------------------------
+rmse_col, rmse_icon = kpi_colour_icon(catboost["rmse"], baseline["rmse"])
+mape_col, mape_icon = kpi_colour_icon(catboost["mape"], baseline["mape"])
 
-    if lower_is_better:
-        if metric_value < baseline_value:
-            color = "success"
-            icon = "↓"
-        elif metric_value > baseline_value:
-            color = "danger"
-            icon = "↑"
-        else:
-             color = "warning"
-             icon = "="
-    else: # Higher is better
-         if metric_value > baseline_value:
-            color = "success"
-            icon = "↑"
-         elif metric_value < baseline_value:
-            color = "danger"
-            icon = "↓"
-         else:
-             color = "warning"
-             icon = "="
-    return color, icon
+def card(title, value, unit="", colour="light", tooltip=None):
+    card_id = str(uuid.uuid4())      # <-- give every card a unique id
+    body    = html.H4(f"{value}{unit}", className="card-title")
 
+    comp    = dbc.Card(
+        [dbc.CardHeader(title), dbc.CardBody(body)],
+        id=card_id,                 # <-- set the id here
+        color=colour,
+        inverse=(colour not in ["light", "secondary"]),
+        className="shadow-sm",
+        style={"height": "100px"}
+    )
 
-# --- App Initialization ---
-# Load default light template for figures
-load_figure_template(template_theme1)
-app = Dash(__name__, external_stylesheets=[url_theme1]) # Start with light theme URL
-app.title = "GB Wind Forecast Dashboard"
+    if tooltip:
+        return dbc.Col([comp,
+                        dbc.Tooltip(tooltip, target=card_id, placement="top")])
+    return dbc.Col(comp)
 
-# --- Prepare KPI Card Styles ---
-rmse_color_cb, rmse_icon_cb = get_kpi_style(catboost.get('rmse',np.nan), baseline.get('rmse',np.nan))
-mape_color_cb, mape_icon_cb = get_kpi_style(catboost.get('mape',np.nan), baseline.get('mape',np.nan))
-kpi_card_style = {"height": "120px"} # Uniform height
+base_rmse = card("Baseline RMSE",  f"{baseline['rmse']:,.0f} MW")
+base_mape = card("Baseline MAPE",  f"{baseline['mape']:.3f}")
+cb_rmse   = card("CatBoost RMSE",  f"{catboost['rmse']:,.0f} MW {rmse_icon}",
+                 colour=rmse_col,
+                 tooltip=f"Δ {(baseline['rmse']-catboost['rmse'])/baseline['rmse']:+.0%}")
+cb_mape   = card("CatBoost MAPE",  f"{catboost['mape']:.3f} {mape_icon}",
+                 colour=mape_col,
+                 tooltip=f"Δ {(baseline['mape']-catboost['mape'])/baseline['mape']:+.1%}")
 
-# --- Calculate Relative Improvements --- 
-rmse_baseline_val = baseline.get('rmse', np.nan)
-rmse_catboost_val = catboost.get('rmse', np.nan)
-mape_baseline_val = baseline.get('mape', np.nan)
-mape_catboost_val = catboost.get('mape', np.nan)
+kpis = dbc.Row([base_rmse, base_mape, cb_rmse, cb_mape], className="g-4 mb-3")
 
-rmse_delta_text = "N/A"
-if not pd.isna(rmse_baseline_val) and rmse_baseline_val != 0 and not pd.isna(rmse_catboost_val):
-    rmse_improvement = (rmse_baseline_val - rmse_catboost_val) / rmse_baseline_val
-    rmse_delta_text = f"Δ RMSE {rmse_improvement:+.0%} vs Baseline"
+# -- Controls ----------------------------------------------------------------
+series_dd = dcc.Dropdown(
+    id="series", multi=True, value=["wind_mw", "wind_mw_pred"],
+    options=[
+        {"label": "Actual",             "value": "wind_mw"},
+        {"label": "Baseline (48 h lag)","value": "wind_mw_lag_48h"},
+        {"label": "CatBoost Prediction","value": "wind_mw_pred"},
+    ])
 
-mape_delta_text = "N/A"
-if not pd.isna(mape_baseline_val) and mape_baseline_val != 0 and not pd.isna(mape_catboost_val):
-     mape_improvement = (mape_baseline_val - mape_catboost_val) / mape_baseline_val
-     mape_delta_text = f"Δ MAPE {mape_improvement:+.1%} vs Baseline"
+date_picker = dcc.DatePickerRange(
+    id="date",   min_date_allowed=min_d, max_date_allowed=max_d,
+    start_date=min_d, end_date=max_d, display_format="DD/MM/YYYY", initial_visible_month=max_d)
 
+controls = dbc.Card(dbc.CardBody(
+    dbc.Row([
+        dbc.Col(html.Label("Series:"), width="auto"),
+        dbc.Col(series_dd, lg=5),
+        dbc.Col(html.Label("Date range:"), width="auto", className="pt-2"),
+        dbc.Col(date_picker, lg=4)
+    ], align="center")), className="mb-3 shadow-sm")
 
-# --- Reusable Components ---
-header = html.Div([ # Use Div instead of H1 for easier styling control
-    html.H2("GB Wind Day-Ahead Forecast", className="display-6"), # Smaller header
-    html.Hr()
-], style={'textAlign': 'left'})
+# -- Layout ------------------------------------------------------------------
+app.layout = dbc.Container([
+    dbc.Row([
+        dbc.Col(html.H2("GB Wind Day‑Ahead Forecast", className="display-6"), width=10),
+        dbc.Col(ThemeSwitchAIO(aio_id="theme", themes=[CSS_LIGHT, CSS_DARK],
+                               switch_props={"style": {"marginTop": "12px"}}), width=2)
+    ]),
+    kpis, controls,
+    dbc.Tabs([
+        dbc.Tab(label="Forecast Plot",       tab_id="forecast"),
+        dbc.Tab(label="Error Distribution",  tab_id="errors")
+    ], id="tabs", active_tab="forecast", className="mb-3"),
+    html.Div(id="tab-content")
+], fluid=False, style={"maxWidth": "1200px", "paddingTop": "18px"})
 
-kpi_cards = dbc.Row( # Use Row with gutter class for spacing
-    [
-        dbc.Col(dbc.Card([
-            dbc.CardHeader("Baseline RMSE"),
-            # Add comma formatting to RMSE
-            dbc.CardBody(html.H4(f"{baseline.get('rmse', 0):,.0f} MW", className="card-title"))
-        ], className="shadow-sm", style=kpi_card_style), lg=3, md=6), # Responsive widths
-         dbc.Col(dbc.Card([
-            dbc.CardHeader("Baseline MAPE"),
-             # Ensure 3 decimal places for MAPE
-            dbc.CardBody(html.H4(f"{baseline.get('mape', 0):.3f}", className="card-title"))
-        ], className="shadow-sm", style=kpi_card_style), lg=3, md=6),
-        dbc.Col([ # Wrap Card in Div to attach Tooltip
-            dbc.Card([
-                dbc.CardHeader("CatBoost RMSE"),
-                dbc.CardBody(html.H4(f"{catboost.get('rmse', 0):,.0f} MW {rmse_icon_cb}", className="card-title")) # Comma format
-            ], id="catboost-rmse-card", color=rmse_color_cb, inverse=True, className="shadow", style=kpi_card_style),
-            dbc.Tooltip(rmse_delta_text, target="catboost-rmse-card", placement="top")
-        ], lg=3, md=6),
-        dbc.Col([ # Wrap Card in Div to attach Tooltip
-             dbc.Card([
-                dbc.CardHeader("CatBoost MAPE"),
-                dbc.CardBody(html.H4(f"{catboost.get('mape', 0):.3f} {mape_icon_cb}", className="card-title")) # Ensure 3 decimals
-            ], id="catboost-mape-card", color=mape_color_cb, inverse=True, className="shadow", style=kpi_card_style),
-             dbc.Tooltip(mape_delta_text, target="catboost-mape-card", placement="top")
-        ], lg=3, md=6),
-    ],
-    className="g-4 mb-4", # Gutter spacing, margin bottom
-)
-
-controls = dbc.Card( # Group controls in a Card
-    dbc.CardBody([
-        dbc.Row([
-            dbc.Col(html.Label("Select Series:"), width="auto"),
-            dbc.Col(
-                dcc.Dropdown(
-                    id='series-selector',
-                    options=[
-                        {'label': 'Actual', 'value': 'wind_mw'},
-                        {'label': 'Baseline (48h Lag)', 'value': 'wind_mw_lag_48h'},
-                        {'label': 'CatBoost Prediction', 'value': 'wind_mw_pred'}
-                    ],
-                    value=['wind_mw', 'wind_mw_pred'], # Default selection
-                    multi=True
-                ), lg=6, md=8 # Control width
-            ),
-             # Date Range Slider (using test data range)
-            dbc.Col(html.Label("Date Range:"), width="auto", className="pt-2"),
-             dbc.Col(
-                dcc.DatePickerRange(
-                    id='date-picker-range',
-                    min_date_allowed=min_date,
-                    max_date_allowed=max_date,
-                    initial_visible_month=max_date,
-                    start_date=min_date, # Default to full range
-                    end_date=max_date,
-                    className="dbc" # Apply dbc styling
-                ), lg=4, md=12 # Control width
-            )
-        ], align="center")
-    ]), className="mb-4 shadow-sm"
-)
-
-tabs = dbc.Tabs(
-    [
-        dbc.Tab(label="Forecast Plot", tab_id="tab-forecast"),
-        dbc.Tab(label="Error Distribution", tab_id="tab-errors"),
-    ],
-    id="tabs",
-    active_tab="tab-forecast",
-    className="mb-3",
-)
-
-# --- App Layout ---
-app.layout = dbc.Container(
-    [
-        dbc.Row([
-            dbc.Col(header, width=10),
-            dbc.Col(ThemeSwitchAIO(aio_id="theme", themes=[url_theme1, url_theme2], switch_props={"style": {"marginTop": "15px"}}), width=2, align="center")
-        ]),
-        kpi_cards,
-        controls,
-        tabs,
-        html.Div(id="tab-content"),
-        # Hidden store for graph template persistence (optional but good practice)
-        dcc.Store(id="graph-template-store", data=template_theme1) 
-    ],
-    fluid=False, # Fixed width
-    className="dbc", # Apply dbc styling to container children
-    style={"maxWidth": "1200px", "paddingTop": "20px"}
-)
-
-
-# --- Callbacks ---
-
-# Callback to switch themes and graph templates
+# -----------------------------------------------------------------------------
+#  Callback
+# -----------------------------------------------------------------------------
 @app.callback(
-    Output("tab-content", "children"), # Regenerate content on theme switch too
-    Output("graph-template-store", "data"), # Store template name
+    Output("tab-content", "children"),
     Input(ThemeSwitchAIO.ids.switch("theme"), "value"),
     Input("tabs", "active_tab"),
-    Input("series-selector", "value"),
-    Input("date-picker-range", "start_date"),
-    Input("date-picker-range", "end_date"),
+    Input("series", "value"),
+    Input("date", "start_date"),
+    Input("date", "end_date"),
 )
-def update_layout_and_tab_content(toggle, active_tab, selected_series, start_date, end_date):
-    template = template_theme1 if toggle else template_theme2
-    load_figure_template(template) # Update plotly template
+def render_tab(toggle, tab, series_sel, start_d, end_d):
+    # theme
+    theme   = THEME_LIGHT if toggle else THEME_DARK
+    load_figure_template(theme)
 
-    # ---- convert picker strings to Timestamps ----
-    start_ts = pd.to_datetime(start_date)
-    end_ts   = pd.to_datetime(end_date)
-    if pd.isna(start_ts) or pd.isna(end_ts):
-        raise exceptions.PreventUpdate
+    # ----- slice & merge data ------------------------------------------------
+    s = pd.to_datetime(start_d).tz_localize("UTC")
+    e = pd.to_datetime(end_d  ).tz_localize("UTC")
 
-    date_filtered_data = plot_data_df[
-        (plot_data_df['datetime'] >= start_ts) &
-        (plot_data_df['datetime'] <= end_ts)
-    ]
+    feats = test_feats[(test_feats["datetime"] >= s) & (test_feats["datetime"] <= e)]
+    if feats.empty:
+        return dbc.Alert("No data in selected range.", color="warning")
 
-    # Render active tab content
-    if active_tab == "tab-forecast":
-        # --- Create Forecast Plot ---
-        if not selected_series or date_filtered_data.empty:
-             fig_forecast = go.Figure().update_layout(
-                 title="Please select series and ensure date range has data",
-                 template=template # Use selected template
-             )
+    df = feats.merge(preds_full, on="datetime", how="left")
+
+    # ------------------------------------------------------------------------
+    if tab == "forecast":
+        fig = go.Figure()
+        if "wind_mw" in series_sel:
+            fig.add_scatter(x=df["datetime"], y=df["wind_mw"],
+                            mode="lines", name="Actual")
+        if "wind_mw_lag_48h" in series_sel and "wind_mw_lag_48h" in df:
+            fig.add_scatter(x=df["datetime"], y=df["wind_mw_lag_48h"],
+                            mode="lines", name="Baseline (48 h lag)",
+                            line=dict(dash="dot"))
+        if "wind_mw_pred" in series_sel and "wind_mw_pred" in df:
+            fig.add_scatter(x=df["datetime"], y=df["wind_mw_pred"],
+                            mode="lines", name="CatBoost Prediction",
+                            line=dict(color="orange"))
+
+        fig.update_layout(template=theme,
+                          title=f"{s.date()} → {e.date()}",
+                          legend=dict(orientation="h", y=1.05, x=0.5,
+                                      xanchor="center", yanchor="bottom"),
+                          xaxis_title="Date", yaxis_title="Wind generation (MW)")
+        return dcc.Graph(figure=fig)
+
+    # ----- error distribution ----------------------------------------------
+    if tab == "errors":
+        if {"wind_mw", "wind_mw_pred"}.issubset(df.columns):
+            resid = (df["wind_mw_pred"] - df["wind_mw"]).dropna()
         else:
-            fig_forecast = go.Figure()
-            title_parts = []
-            # Add traces based on selected_series
-            if 'wind_mw' in selected_series:
-                fig_forecast.add_trace(go.Scatter(x=date_filtered_data["datetime"], y=date_filtered_data["wind_mw"],
-                                         mode='lines', name='Actual'))
-                title_parts.append("Actual")
-            if 'wind_mw_lag_48h' in selected_series:
-                 fig_forecast.add_trace(go.Scatter(x=date_filtered_data["datetime"], y=date_filtered_data["wind_mw_lag_48h"],
-                                          mode='lines', name='Baseline (48h Lag)', line=dict(dash='dot')))
-                 title_parts.append("Baseline")
-            if 'wind_mw_pred' in selected_series and 'wind_mw_pred' in date_filtered_data.columns:
-                fig_forecast.add_trace(go.Scatter(x=date_filtered_data["datetime"], y=date_filtered_data["wind_mw_pred"],
-                                         mode='lines', name='CatBoost Prediction', line=dict(color='orange')))
-                title_parts.append("CatBoost")
+            resid = pd.Series(dtype=float)
 
-            fig_forecast.update_layout(
-                title=" vs. ".join(title_parts) + f" ({start_date} to {end_date})",
-                xaxis_title="Date",
-                yaxis_title="Wind Generation (MW)",
-                template=template, # Use selected template
-                legend_title_text="",
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5) # Center legend above plot
-            )
-        tab_content = dcc.Graph(figure=fig_forecast)
+        if resid.empty:
+            return dbc.Alert("No overlapping actual/prediction data.", color="warning")
 
-    elif active_tab == "tab-errors":
-        # --- Create Error Distribution Plot ---
-        # Calculate residuals only on filtered data
-        residuals = date_filtered_data['wind_mw_pred'] - date_filtered_data['wind_mw']
-        residuals = residuals.dropna() # Drop NaNs if predictions or actuals are missing
+        fig = px.histogram(resid, nbins=50, template=theme,
+                           title=f"Prediction error distribution ({s.date()} – {e.date()})",
+                           labels={"value": "Predicted − Actual (MW)"})
+        fig.update_layout(bargap=0.05, yaxis_title="Frequency",
+                          coloraxis_showscale=False)
+        return dcc.Graph(figure=fig)
 
-        if residuals.empty:
-            fig_errors = go.Figure().update_layout(title="No data available for error distribution", template=template)
-        else:
-            hist_color = "#2ecc71"
-            fig_errors = px.histogram(
-                residuals, nbins=50, title="Distribution of CatBoost Prediction Errors (MW)", template=template,
-                color_discrete_sequence=[hist_color]
-            )
-            fig_errors.update_layout(
-                xaxis_title="Prediction Error (Predicted - Actual) MW",
-                yaxis_title="Frequency",
-                bargap=0.1
-            )
-
-        tab_content = dcc.Graph(figure=fig_errors)
-    else:
-        tab_content = html.Div("Invalid tab selected")
-
-    return tab_content, template # Return standardized variable
+    return dbc.Alert("Unknown tab.", color="danger")
 
 
-# --- Main Execution ---
+# -----------------------------------------------------------------------------
 if __name__ == "__main__":
-    app.run(debug=True) 
+    # force 16 px base font in both themes
+    from pathlib import Path
+    css = ROOT / "assets" / "z_override.css"
+    css.parent.mkdir(exist_ok=True)
+    css.write_text("html,body{font-size:16px !important;}")
+
+    app.run(debug=True)

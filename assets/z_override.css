@@ -1,7 +1,1 @@
-/* assets/override.css */
-
-/* Ensure consistent base font size across themes */
-html,
-body {
-    font-size: 16px !important; /* Use !important to override theme defaults */
-} 
+html,body{font-size:16px !important;}
