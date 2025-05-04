@@ -23,7 +23,9 @@ jobs:
           sudo apt-get update && sudo apt-get install -y libgomp1   # CatBoost needs OpenMP
 
       - name: Run nightly pipeline
-        run: python src/pipeline.py
+        run: |
+          # launch the package as a module so "src" is on PYTHONPATH
+          python -m src.pipeline
 
       - name: Commit & push new predictions
         env:
