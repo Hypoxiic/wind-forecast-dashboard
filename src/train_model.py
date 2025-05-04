@@ -1,145 +1,275 @@
-# src/train_model.py
+"""
+Wind day‑ahead – Enhanced GPU Training Script
+---------------------------------------------
+* Expanding‑window walk‑forward validation
+* GPU‑accelerated Optuna hyper‑parameter search
+* No column sampling (GPU limitation)
+* Power‑curve features (v³ and clipped v³)
+* Target = capacity factor → rescale back to MW
+* Metrics & artefacts saved
+"""
 
-import pandas as pd
-import numpy as np
+from __future__ import annotations
+
 import json
 import logging
+import warnings
 from pathlib import Path
-from sklearn.metrics import mean_absolute_percentage_error, mean_squared_error
-from catboost import CatBoostRegressor
 
-# --- Configuration ---
+import numpy as np
+import optuna
+import pandas as pd
+from catboost import CatBoostRegressor, Pool
+from sklearn.metrics import mean_absolute_percentage_error, mean_squared_error
+from sklearn.model_selection import TimeSeriesSplit
+from tqdm.auto import tqdm
+
+# ──────────────────────────
+# Optional: GPU installation check
+# ──────────────────────────
+try:
+    from catboost.dev_utils.installation_check import check_gpu_installation  # type: ignore
+    check_gpu_installation()
+    logging.info("CatBoost GPU installation check passed.")
+except Exception as e:
+    logging.warning(
+        f"CatBoost GPU check failed or tool unavailable: {e}. "
+        "Make sure your drivers / CUDA toolkit are OK."
+    )
+
+# ──────────────────────────
+# Config & logging
+# ──────────────────────────
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 
-DATA_DIR = Path("data")
-FEATURES_PATH = DATA_DIR / "features" / "features.parquet"
-METRICS_PATH = Path("metrics.json") # Save in root directory
-MODEL_SAVE_PATH = Path("model.cbm") # Path to save the trained model
+DATA_DIR   = Path("data")
+FEAT_PATH  = DATA_DIR / "features" / "features.parquet"
+PRED_DIR   = DATA_DIR / "predictions"
+PRED_DIR.mkdir(parents=True, exist_ok=True)
 
-TARGET = "wind_mw"
+METRICS_PATH = Path("metrics.json")
+MODEL_PATH   = Path("model.cbm")
+STUDY_PATH   = Path("optuna_study_gpu.pkl")
 
-# --- Load Data ---
-logging.info(f"Loading features from {FEATURES_PATH}...")
-if not FEATURES_PATH.exists():
-    logging.error(f"Features file not found at {FEATURES_PATH}")
-    raise FileNotFoundError(f"Features file not found at {FEATURES_PATH}")
+# ──────────────────────────
+# Load & enrich features
+# ──────────────────────────
+logging.info(f"Loading features from {FEAT_PATH}…")
+df = pd.read_parquet(FEAT_PATH)
+df["datetime"] = pd.to_datetime(df["datetime"], utc=True)
+logging.info(f"Data shape: {df.shape}")
 
-df = pd.read_parquet(FEATURES_PATH)
+# Power‑curve proxies
+RATED_MS = 15.0
+df["wind_speed_v3"]      = df["wind_speed_ms"] ** 3
+df["wind_speed_v3_clip"] = np.clip(df["wind_speed_ms"], 0, RATED_MS) ** 3
 
-# Ensure datetime type
-df["datetime"] = pd.to_datetime(df["datetime"])
-logging.info(f"Loaded DataFrame shape: {df.shape}")
+# Capacity‑factor target
+capacity_mw          = df["wind_mw"].max()
+df["capacity_factor"] = df["wind_mw"] / capacity_mw
+logging.info(f"Calculated max capacity (approx): {capacity_mw:.1f} MW")
 
-# --- Diagnostic Print Statements ---
-logging.info("--- Data Diagnostics ---")
-logging.info(f"Earliest date: {df['datetime'].min()}")
-logging.info(f"Latest date : {df['datetime'].max()}")
-logging.info(f"Total rows  : {len(df)}")
-logging.info("------------------------")
+TARGET        = "capacity_factor"
+CAT_FEATURES  = ["is_holiday"]
+FEATURES      = [c for c in df.columns if c not in {"datetime", "wind_mw", TARGET}]
+logging.info(f"Using {len(FEATURES)} features.")
 
-# --- Train/Test Split ---
-logging.info("Splitting data into train/test sets...")
-# # Train on 2024 Q1–Q3, test on Q4 to date. (Old method - failed due to actual start date)
-# train_start = "2024-01-01"
-# train_end = "2024-09-30 23:59:59" # Inclusive end of Q3
-# test_start = "2024-10-01"
+X = df[FEATURES]
+y = df[TARGET]
 
-# --- New Split Method: Use percentage based on available data --- 
-split_fraction = 0.75
-split_index = int(len(df) * split_fraction)
-split_date = df['datetime'].iloc[split_index]
+# ──────────────────────────
+# Walk‑forward CV
+# ──────────────────────────
+N_SPLITS  = 5
+TEST_SIZE = 24 * 2  # 48 half‑hours (24 h)
 
-df_train = df[df["datetime"] < split_date].copy()
-df_test = df[df["datetime"] >= split_date].copy()
-# --- End New Split Method ---
+tscv = TimeSeriesSplit(n_splits=N_SPLITS, test_size=TEST_SIZE, gap=0)
+logging.info(f"Using TimeSeriesSplit with {N_SPLITS} splits, test_size={TEST_SIZE}.")
 
-if df_train.empty or df_test.empty:
-     logging.error("Train or test split resulted in empty DataFrame. Check date ranges and data.")
-     raise ValueError("Empty train or test set after split.")
+# ──────────────────────────
+# Optuna objective
+# ──────────────────────────
+def objective(trial: optuna.Trial) -> float:
+    # Choose bootstrap first (affects allowed params)
+    bootstrap_type = trial.suggest_categorical(
+        "bootstrap_type", ["Bayesian", "Bernoulli", "MVS"]
+    )
 
-logging.info(f"Train shape: {df_train.shape}")
-logging.info(f"Test shape: {df_test.shape}")
+    params: dict = {
+        # Core tree parameters
+        "iterations":    trial.suggest_int("iterations", 500, 4000),
+        "depth":         trial.suggest_int("depth", 4, 11),
+        "learning_rate": trial.suggest_float("lr", 0.01, 0.2, log=True),
+        "l2_leaf_reg":   trial.suggest_float("l2", 0.5, 20.0, log=True),
 
-# Define features (X) and target (y)
-FEATURES = [col for col in df.columns if col not in ["datetime", TARGET]]
+        # Row‑sampling (GPU‑compatible). NOT allowed with Bayesian bootstrap.
+        "subsample":     trial.suggest_float("subsample", 0.6, 1.0),
 
-# Check if lag feature exists for baseline
-BASELINE_LAG_FEATURE = 'wind_mw_lag_48h'
-if BASELINE_LAG_FEATURE not in FEATURES:
-    logging.error(f"Baseline feature '{BASELINE_LAG_FEATURE}' not found in columns.")
-    raise ValueError(f"Missing required baseline feature: {BASELINE_LAG_FEATURE}")
+        # Other knobs
+        "boosting_type":   trial.suggest_categorical("boosting_type", ["Ordered", "Plain"]),
+        "bootstrap_type":  bootstrap_type,
+        "random_strength": trial.suggest_float("random_strength", 1e-8, 10.0, log=True),
+        "border_count":    trial.suggest_int("border_count", 32, 255),
 
-X_train, y_train = df_train[FEATURES], df_train[TARGET]
-X_test, y_test = df_test[FEATURES], df_test[TARGET]
-
-# --- Baseline Model: Persistence (ŷ(t) = y(t - 48 hours)) ---
-logging.info("Calculating baseline (persistence) metrics...")
-y_pred_baseline = X_test[BASELINE_LAG_FEATURE]
-
-mape_baseline = mean_absolute_percentage_error(y_test, y_pred_baseline)
-# rmse_baseline = mean_squared_error(y_test, y_pred_baseline, squared=False) # Old way
-rmse_baseline = mean_squared_error(y_test, y_pred_baseline) ** 0.5 # New way
-
-logging.info(f"Baseline MAPE: {mape_baseline:.4f}")
-logging.info(f"Baseline RMSE: {rmse_baseline:.2f}")
-
-metrics = {
-    "baseline": {
-        "mape": mape_baseline,
-        "rmse": rmse_baseline
+        # Fixed for GPU regression
+        "loss_function":  "RMSE",
+        "eval_metric":    "RMSE",
+        "task_type":      "GPU",
+        "devices":        "0",
+        "random_state":   42,
+        "verbose":        0,
     }
-}
 
-# --- Model Training: CatBoostRegressor ---
-logging.info("Training CatBoostRegressor model...")
-# Use default parameters for now, consider adding task_type='GPU' if GPU available
-model = CatBoostRegressor(
-    random_state=42,
-    verbose=100 # Print progress every 100 iterations
-    # task_type="GPU" # Uncomment this if a compatible GPU and drivers are available
+    # Remove subsample if Bayesian bootstrap (not supported)
+    if bootstrap_type == "Bayesian":
+        params.pop("subsample", None)
+        params["bagging_temperature"] = trial.suggest_float("bagging_temperature", 0.0, 1.0)
+
+    rmses = []
+    fold_iter = tqdm(
+        tscv.split(X),
+        total=N_SPLITS,
+        desc=f"Trial {trial.number:03d}",
+        leave=False,
+    )
+    for fold, (train_idx, test_idx) in enumerate(fold_iter):
+        train_pool = Pool(
+            X.iloc[train_idx], y.iloc[train_idx], cat_features=CAT_FEATURES
+        )
+        valid_pool = Pool(
+            X.iloc[test_idx], y.iloc[test_idx], cat_features=CAT_FEATURES
+        )
+
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                model = CatBoostRegressor(**params)
+                model.fit(
+                    train_pool,
+                    eval_set=valid_pool,
+                    use_best_model=True,
+                    early_stopping_rounds=50,
+                    verbose=False,
+                )
+        except Exception as e:
+            logging.error(f"Trial failed (fold {fold + 1}): {e}")
+            return float("inf")
+
+        pred_cf = model.predict(X.iloc[test_idx])
+        mse  = mean_squared_error(
+            y.iloc[test_idx] * capacity_mw, pred_cf * capacity_mw
+        )
+        rmse = mse ** 0.5
+        rmses.append(rmse)
+
+    return float(np.mean(rmses))
+
+
+# ──────────────────────────
+# Hyper‑parameter tuning
+# ──────────────────────────
+N_TRIALS = 75
+logging.info(f"Optuna study starts – {N_TRIALS} GPU trials with inner tqdm fold bars.")
+study = optuna.create_study(direction="minimize", study_name="wind_catboost_gpu_tuning")
+study.optimize(objective, n_trials=N_TRIALS, show_progress_bar=True)
+
+best_params_optuna = study.best_params
+best_value = study.best_value
+logging.info(f"Optuna best CV RMSE: {best_value:.4f}")
+logging.info(f"Best params: {best_params_optuna}")
+
+# Save study (optional)
+try:
+    import joblib
+
+    joblib.dump(study, STUDY_PATH)
+except Exception as e:
+    logging.warning(f"Could not save Optuna study: {e}")
+
+# ──────────────────────────
+# Prepare final parameters
+# ──────────────────────────
+final_params = best_params_optuna.copy()
+if "lr" in final_params:
+    final_params["learning_rate"] = final_params.pop("lr")
+if "l2" in final_params:
+    final_params["l2_leaf_reg"] = final_params.pop("l2")
+
+# Remove column sampling (shouldn't exist, but be safe) and adjust subsample if needed
+for key in ("colsample", "colsample_bylevel", "rsm"):
+    final_params.pop(key, None)
+if final_params.get("bootstrap_type") == "Bayesian":
+    final_params.pop("subsample", None)  # Bayesian bootstrap can't have subsample
+
+final_params.update(
+    {
+        "loss_function": "RMSE",
+        "task_type": "GPU",
+        "devices": "0",
+        "random_state": 42,
+        "verbose": 200,
+    }
 )
 
-model.fit(X_train, y_train)
+if "iterations" not in final_params:
+    raise ValueError("'iterations' missing from best params – investigate Optuna output")
 
-logging.info("Evaluating CatBoost model...")
-y_pred_catboost = model.predict(X_test)
+# ──────────────────────────
+# Final training
+# ──────────────────────────
+holdout_size = TEST_SIZE
+X_train_full, y_train_full = X.iloc[:-holdout_size], y.iloc[:-holdout_size]
+X_holdout, y_holdout       = X.iloc[-holdout_size:], y.iloc[-holdout_size:]
 
-mape_catboost = mean_absolute_percentage_error(y_test, y_pred_catboost)
-# rmse_catboost = mean_squared_error(y_test, y_pred_catboost, squared=False) # Old way
-rmse_catboost = mean_squared_error(y_test, y_pred_catboost) ** 0.5 # New way
+logging.info(f"Training final GPU model on {X_train_full.shape[0]} samples …")
+model = CatBoostRegressor(**final_params)
+model.fit(Pool(X_train_full, y_train_full, cat_features=CAT_FEATURES))
 
-logging.info(f"CatBoost MAPE: {mape_catboost:.4f}")
-logging.info(f"CatBoost RMSE: {rmse_catboost:.2f}")
+# -------- new: save predictions for the *entire* feature set --------
+full_pred_cf = model.predict(X)            # X == all data
+full_pred_mw = full_pred_cf * capacity_mw
 
-metrics["catboost"] = {
-    "mape": mape_catboost,
-    "rmse": rmse_catboost
+pd.DataFrame({
+    "datetime": df["datetime"],
+    "wind_mw_pred": full_pred_mw
+}).to_parquet(
+    PRED_DIR / "catboost_full.parquet",     # <- NEW file
+    index=False
+)
+
+
+# ──────────────────────────
+# Evaluation & artefacts
+# ──────────────────────────
+pred_hold_cf = model.predict(X_holdout)
+pred_hold_mw = pred_hold_cf * capacity_mw
+actual_hold_mw = y_holdout * capacity_mw
+
+mse_final  = mean_squared_error(actual_hold_mw, pred_hold_mw)
+rmse_final = mse_final ** 0.5
+mape_final = mean_absolute_percentage_error(actual_hold_mw, pred_hold_mw)
+logging.info(f"Hold‑out RMSE = {rmse_final:.2f} MW | MAPE = {mape_final:.4f}")
+
+metrics = {
+    "holdout_rmse_mw": rmse_final,
+    "holdout_mape": mape_final,
+    "capacity_mw_approx": capacity_mw,
+    "optuna_best_cv_rmse": best_value,
+    "optuna_n_trials": N_TRIALS,
+    "optuna_best_params_raw": best_params_optuna,
+    "final_model_params": final_params,
 }
+METRICS_PATH.write_text(json.dumps(metrics, indent=4))
 
-# --- Save Metrics ---
-logging.info(f"Saving metrics to {METRICS_PATH}...")
-with open(METRICS_PATH, 'w') as f:
-    json.dump(metrics, f, indent=4)
-logging.info("Metrics saved.")
+model.save_model(str(MODEL_PATH))
 
-# --- Save CatBoost Predictions on Test Set ---
-logging.info("Saving CatBoost predictions on the test set...")
-PRED_DIR = DATA_DIR / "predictions"
-PRED_DIR.mkdir(parents=True, exist_ok=True) # Create dir if it doesn't exist
-PRED_PATH = PRED_DIR / "catboost_test.parquet"
+pred_df = pd.DataFrame(
+    {
+        "datetime": df["datetime"].iloc[-holdout_size:],
+        "wind_mw_actual": actual_hold_mw,
+        "wind_mw_pred": pred_hold_mw,
+    }
+)
+pred_df.to_parquet(PRED_DIR / "catboost_holdout_gpu_final.parquet", index=False)
 
-# Create DataFrame with datetime and predictions
-pred_df = pd.DataFrame({
-    'datetime': df_test['datetime'], # Get datetimes from the test set DataFrame
-    'wind_mw_pred': y_pred_catboost
-})
-
-pred_df.to_parquet(PRED_PATH, index=False)
-logging.info(f"Test set predictions saved to {PRED_PATH}")
-
-# --- Save Model ---
-# logging.info(f"Saving trained model to {MODEL_SAVE_PATH}...")
-# model.save_model(str(MODEL_SAVE_PATH)) # Uncomment to save the model
-# logging.info("Model saved.")
-
-logging.info("Script finished.") 
+logging.info("✓ Enhanced GPU training complete – model, metrics & predictions saved.")

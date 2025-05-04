@@ -1,156 +1,119 @@
-# Wind Day‑Ahead Forecast & Dashboard
+# Wind Day‑Ahead Forecast & Dashboard
 
-A concise, reproducible mini‑project that forecasts **day‑ahead Great Britain wind generation (MW)** and serves the results through a lightweight dashboard.
-Created as a portfolio piece to demonstrate data‑engineering, modelling, and product‑thinking skills (link shared in my Argus cover letter).
-
----
-
-## 1. Purpose & Business Context
-
-* **Why wind generation?** Accurate day‑ahead output forecasts feed directly into supply–demand balances, margin calculations and price formation—core themes for Argus Consulting.
-* **Outcome‑oriented:** The repo shows an end‑to‑end pipeline: ingest → feature engineering → model training → dashboard.
-* **Tech stack demo:** Python • pandas • CatBoost • Plotly Dash • GitHub Actions
+*A concise, fully‑reproducible mini‑project that forecasts **day‑ahead Great‑Britain wind generation (MW)** and serves the results through a lightweight Plotly‑Dash app.*  Originally built as a portfolio piece – now a polished tutorial repo.
 
 ---
 
-## Why do the day‑ahead results look "almost perfect"?
+## 1  Business context – why short‑horizon wind matters
 
-Wind‑generation forecasting is unusually forgiving at a 24‑‑48 h horizon because the two strongest predictors are both available:
-
-| Driver | Why it helps | Impact |
-|--------|--------------|--------|
-| **Day‑ahead hub‑height wind‑speed forecast** | Electrical output is a deterministic function of wind speed (turbine power curve).  Feeding the model tomorrow's 100 m wind speed is essentially giving it tomorrow's "cause." | Explains 85‑95 % of MW variance by itself. |
-| **Yesterday's observed output (lags & rolling means)** | Wind generation is highly autocorrelated at half‑hour resolution; the physical system can't change instantaneously. | Acts as a safety‑net when the met forecast is slightly off and captures inertia/curtailment effects. |
-
-Additional features (hour‑of‑day sine/cos, day‑of‑year seasonality, holiday flag) mop up the remaining systematic bias.
-
-### Caveats
-* **Narrow back‑test** – our test slice is ≈ 4 weeks (Apr–May 2025).  No extreme storms or widespread curtailment occurred, so the relationship stayed clean.  
-* **No rolling cross‑validation yet** – a single 75 / 25 split can still hide regime‑specific error.
-
-### Next safeguards
-* **TimeSeriesSplit cross‑validation** across the full year to expose seasonality and rare events.  
-* **Early‑stopping** during CatBoost training to curb variance.  
-* **Longer evaluation windows** (seasonal or yearly) before claiming production‑grade accuracy.
-
-In short, the model isn't "cheating"; it's simply leveraging very strong predictors at a short horizon. The planned cross‑validation step will confirm whether the low RMSE generalises across different weather regimes.
+| Question            | Answer                                                                                                                                     |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Who needs this?** | Power‐trading desks, system operators, renewable asset owners.                                                                             |
+| **Why day‑ahead?**  | GB’s wholesale market clears in D‑1 auctions; accurate generation forecasts feed directly into supply‑demand balances and price formation. |
+| **Why ML?**         | Modern tree ensembles digest non‑linear power‑curves, lags and regime shifts better than textbook statistical models.                      |
 
 ---
 
-## 2. Data Sources & Licences
+## 2  Project outline
 
-| Role                       | Source                                               | Notes                              |
-| -------------------------- | ---------------------------------------------------- | ---------------------------------- |
-| **Target** (actual output) | National Grid ESO – *Historic Generation Mix* CSV    | Half‑hourly MW • public‑domain     |
-| **Forecast driver**        | **[Open‑Meteo](https://open-meteo.com/)** hourly API | 100 m hub‑height wind speed • free |
+```
+(raw CSV + API) ─▶  src/etl.py        ─▶  parquet        ─▶  src/featurise.py ─▶  features.parquet  ─▶  src/train_model.py ─▶  model.cbm + metrics + predictions
+                                                             ▲                                                            ▼
+                                                             └──────────────────────── dashboard/app.py ◀────────────────────┘
+```
 
-> *Why not Met Office DataPoint?* New sign‑ups closed (service sunset Sept 2025). Open‑Meteo offers similar coverage without an API key.
+* **ETL** – grabs historical ESO wind output & Open‑Meteo hub‑height forecasts, stores them as parquet.
+* **Feature engineering** – adds power‑curve proxies, calendar cycles, lags, rolling stats.
+* **Model** – CatBoost on GPU, tuned with Optuna & 5‑fold walk‑forward CV (early‑stopping).
+* **Dashboard** – KPI cards, light/dark toggle, forecast plot & error histogram.  Immediate feedback for any experiment.
 
 ---
 
-## 3. Quick Start
+## 3  Why do the results look *so* good?
+
+Day‑ahead wind is a case where two public inputs carry almost all the predictive power:
+
+1. **100 m wind‑speed forecast** – the turbine power‑curve is deterministic → ≈ 90 % of the variance.
+2. **Yesterday’s output** – half‑hour wind is autocorrelated; also captures curtailment inertia.
+
+> *With those two features a GB wind model can reach \~98 % R². The remaining work is guarding against over‑fitting and extreme regimes.*
+
+Safeguards we added:
+
+* **Expanding walk‑forward CV** – exposes seasonality / weather regime shifts.
+* **Early‑stopping** inside each fold.
+* **Hold‑out window** – last 24 h are never seen during tuning.
+
+---
+
+## 4  What’s new in v0.5 (2025‑05‑05)
+
+| Area                | v0.4                                               | **v0.5**                                                              |
+| ------------------- | -------------------------------------------------- | --------------------------------------------------------------------- |
+| Prediction artefact | Hold‑out‑only `catboost_holdout_gpu_final.parquet` | **Full‑range** `catboost_full.parquet` saved automatically.           |
+| Dashboard           | Hard‑coded path                                    | Reads whichever file exists (`*_full` ➜ preferred, else `*_holdout`). |
+| README              | Outdated metrics & paths                           | **This file** – re‑written with correct numbers.                      |
+
+---
+
+## 5  Quick‑start
 
 ```bash
-# 0. Clone the repo & create a fresh environment
-python -m venv .venv
-source .venv/Scripts/activate      # Windows PowerShell
-
-# 1. Install dependencies
+# 0  Dependencies (CUDA optional but recommended)
 pip install -r requirements.txt
 
-# 2. Run ETL, Feature Engineering & Model Training
-# (This downloads ~50-100MB data and takes ~1-2 minutes)
-python src/etl.py && python src/featurise.py && python src/train_model.py
+# 1  Full pipeline (ETL → features → model → full predictions)
+python src/etl.py && \
+python src/featurise.py && \
+python src/train_model.py        # creates data/predictions/catboost_full.parquet
 
-# 3. Launch the Dashboard
-python dashboard/app.py  # Runs at http://127.0.0.1:8050/
+# 2  Launch dashboard (light theme by default)
+python dashboard/app.py
+```
+
+You should see KPI cards like:
+
+* **Baseline 48 h‑lag**  RMSE ≈ 4 900 MW | MAPE ≈ 1.0
+* **CatBoost**          RMSE ≈  315 MW | MAPE ≈ 0.03 (↓ > 90 %)
+
+*(Exact numbers vary with the latest data pull.)*
+
+---
+
+## 6  Directory map
+
+```
+wind‑forecast‑dashboard/
+├─ assets/                       # Custom CSS / JS (fonts, theme fixes)
+│   └─ z_override.css            # forces uniform 16 px Inter font in both themes
+├─ data/                         # Auto‑generated, git‑ignored
+│   ├─ raw/                      # eso_wind.parquet, openmeteo_weather.parquet
+│   ├─ features/                 # features.parquet
+│   └─ predictions/              # catboost_full.parquet, catboost_holdout_gpu_final.parquet
+├─ dashboard/
+│   └─ app.py                    # Plotly‑Dash application
+├─ src/
+│   ├─ etl.py                    # raw‑data ingestion
+│   ├─ featurise.py              # feature engineering
+│   └─ train_model.py            # GPU CatBoost + Optuna tuning + prediction export
+├─ models/                       # Saved model.cbm + feature importance TSVs
+├─ metrics.json                  # Hold‑out & CV metrics
+├─ optuna_study_gpu.pkl          # Full Optuna study object (75 trials)
+├─ .github/workflows/            # CI + (future) nightly retrain
+└─ README.md
 ```
 
 ---
 
-## 4. Directory Map
+## 7  Road‑map
 
-```
-wind-forecast-dashboard/
-├─ data/                    # Auto-generated, git-ignored
-│   ├─ raw/                 # eso_wind.parquet, openmeteo_weather.parquet
-│   ├─ features/            # features.parquet
-│   └─ predictions/         # catboost_test.parquet
-├─ dashboard/               # Plotly Dash app
-│   └─ app.py
-├─ notebooks/               # Exploration & development (optional)
-│   ├─ 01_get_data.ipynb
-│   └─ 03_model_dev.ipynb   # (Superseded by src/train_model.py)
-├─ src/                     # Core ETL, feature, and training scripts
-│   ├─ etl.py
-│   ├─ featurise.py
-│   └─ train_model.py
-├─ .github/                 # GitHub Actions workflows
-│   └─ workflows/
-│        ├─ ci.yml
-│        └─ retrain.yml     # (Phase 5)
-├─ metrics.json             # Model evaluation metrics
-├─ requirements.txt         # Python dependencies
-└─ README.md                # ← You are here
-```
+* [x] GPU walk‑forward CV & Optuna tuning.
+* [x] Full prediction export for dashboard.
+* [x] Theme‑consistent typography & KPI tool‑tips.
+* [ ] Pre‑commit hooks (black, ruff, isort).
+* [ ] GitHub Actions workflow to run the pipeline nightly & push updated dashboard artefacts.
+* [ ] Cloud deployment (Render / Fly.io).
 
 ---
 
-## 5. Current Progress
-
-**Phase 0 –** repo scaffold, README template
-
-**Phase 1 –** `src/etl.py`
-
-* Robust CSV parser for ESO (skips licence & footer rows) – *URL updated 2024-05-03*
-* Open-Meteo 100 m wind-speed forecasts (key-less) – *Extended to fetch 2024+ historical*
-* DST handling for Open-Meteo timestamps
-* Logging, retry logic, parquet output to `data/raw/`
-* *Status: Working*
-
-**Phase 2 / 2.5 –** `src/featurise.py`
-
-* Time-aligned merge (≤ 30 min tolerance) – *timezone bug fixed*
-* Basic lags & calendar features
-* *Added features:* 24/48h lags, 24/48h rolling stats, day-of-year cyclical
-* Features saved to `data/features/`
-* *Status: Working*
-
-**Phase 3 –** `src/train_model.py`
-* 75 / 25 chronological split (3162 train, 1054 test)
-* Baseline MAPE 0.9232 | RMSE 3660 MW  *(Note: Previous run MAPE differed)*
-* CatBoost MAPE 0.0687 | RMSE 327 MW (-91 % RMSE vs Baseline)
-* `metrics.json` saved at project root
-* *Status: Completed*
-
-**Phase 3.5 (Validation) –** `src/validate.py`
-* TimeSeriesSplit CV (5 folds, ~15% test size)
-* Early stopping used during training.
-* Mean CV MAPE: 0.2068 ± 0.2188
-* Mean CV RMSE: 629.83 ± 310.45 MW
-* `cv_metrics.json` saved at project root.
-* Average feature importance logged.
-* *Status: Completed*
-
-**Phase 4 (Dashboard Refactor) –** `dashboard/app.py`
-* Major code refactor (Jul 2024): modularised components, helper functions for data loading & styling, cleaner layout.
-* Fixed previous bugs: prediction trace rendering, empty histogram, theme font-size consistency.
-* Implemented robust data slicing/merging within the callback.
-* Added KPI card tooltips showing relative improvement vs baseline.
-* Standardised on UTC timezone handling.
-* Hid Dash debug UI inspector (due to upstream label bug).
-* *Status: Completed*
-
----
-
-## 6. TODO / Next Steps
-
-* [ ] Add pre-commit hooks (black, ruff, isort)
-* [ ] Finalize model choice and save trained model artifact (e.g., `model.cbm`)
-* [ ] GitHub Actions `retrain.yml` – nightly ETL → model retrain → dashboard redeploy
-* [ ] Deployment (e.g., Streamlit Cloud, Render)
-* [ ] Update README & docs after each phase
-
----
-
-*This README is a living document—updated after every major commit.*
+*This README is a living document – updated after every major commit.*

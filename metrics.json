@@ -1,10 +1,35 @@
 {
-    "baseline": {
-        "mape": 0.9145094074791691,
-        "rmse": 3723.222250897395
+    "holdout_rmse_mw": 298.7640962870085,
+    "holdout_mape": 0.02590464917966223,
+    "capacity_mw_approx": 16971.0,
+    "optuna_best_cv_rmse": 234.93879531667463,
+    "optuna_n_trials": 75,
+    "optuna_best_params_raw": {
+        "bootstrap_type": "Bayesian",
+        "iterations": 3596,
+        "depth": 10,
+        "lr": 0.027460336881992318,
+        "l2": 1.6012927542764996,
+        "subsample": 0.7069260172874948,
+        "boosting_type": "Ordered",
+        "random_strength": 0.004105089444054274,
+        "border_count": 148,
+        "bagging_temperature": 0.13715638379335676
     },
-    "catboost": {
-        "mape": 0.06377031429017015,
-        "rmse": 313.49079517747595
+    "final_model_params": {
+        "bootstrap_type": "Bayesian",
+        "iterations": 3596,
+        "depth": 10,
+        "boosting_type": "Ordered",
+        "random_strength": 0.004105089444054274,
+        "border_count": 148,
+        "bagging_temperature": 0.13715638379335676,
+        "learning_rate": 0.027460336881992318,
+        "l2_leaf_reg": 1.6012927542764996,
+        "loss_function": "RMSE",
+        "task_type": "GPU",
+        "devices": "0",
+        "random_state": 42,
+        "verbose": 200
     }
 }
