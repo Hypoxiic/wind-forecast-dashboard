@@ -120,6 +120,29 @@ else:
 # KPI helper (colour + icon)
 # -----------------------------------------------------------------------------
 
+# ───── Intro / explanation card ─────────────────────────────────────────────
+intro = dbc.Card(
+    dbc.CardBody(
+        [
+            html.P(
+                "This dashboard forecasts day‑ahead GB wind generation with a "
+                "GPU‑tuned CatBoost model. ESO wind output is merged with "
+                "Open‑Meteo hub‑height forecasts; power‑curve proxies, lags "
+                "and seasonal features feed the model. Optuna tunes hyper‑"
+                "parameters via five expanding walk‑forward CV splits.",
+                className="mb-2",
+            ),
+            html.P(
+                "Hold‑out (last 24 h) error: RMSE ≈ 300 MW • MAPE ≈ 0.03 "
+                "(≈ –94 % vs 48 h‑lag baseline).",
+                className="fst-italic small mb-0",
+            ),
+        ]
+    ),
+    className="mb-4 shadow-sm border-0",
+)
+
+
 def kpi_colour_icon(value, base, lower_better=True):
     if np.isnan(value) or np.isnan(base):
         return "secondary", ""
@@ -240,6 +263,7 @@ app.layout = dbc.Container(
                 ),
             ]
         ),
+        intro,
         kpis,
         controls,
         dbc.Tabs(
