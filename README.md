@@ -94,9 +94,18 @@ wind-forecast-dashboard/
 
 **Phase 3 –** `src/train_model.py`
 * 75 / 25 chronological split (3162 train, 1054 test)
-* Baseline MAPE 0.0688 | RMSE 3660 MW
-* CatBoost MAPE 0.0687 | RMSE 327 MW (-91 % RMSE)
+* Baseline MAPE 0.9232 | RMSE 3660 MW  *(Note: Previous run MAPE differed)*
+* CatBoost MAPE 0.0687 | RMSE 327 MW (-91 % RMSE vs Baseline)
 * `metrics.json` saved at project root
+* *Status: Completed*
+
+**Phase 3.5 (Validation) –** `src/validate.py`
+* TimeSeriesSplit CV (5 folds, ~15% test size)
+* Early stopping used during training.
+* Mean CV MAPE: 0.2068 ± 0.2188
+* Mean CV RMSE: 629.83 ± 310.45 MW
+* `cv_metrics.json` saved at project root.
+* Average feature importance logged.
 * *Status: Completed*
 
 ---
