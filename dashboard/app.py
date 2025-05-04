@@ -99,6 +99,21 @@ rmse_color_cb, rmse_icon_cb = get_kpi_style(catboost.get('rmse',np.nan), baselin
 mape_color_cb, mape_icon_cb = get_kpi_style(catboost.get('mape',np.nan), baseline.get('mape',np.nan))
 kpi_card_style = {"height": "120px"} # Uniform height
 
+# --- Calculate Relative Improvements --- 
+rmse_baseline_val = baseline.get('rmse', np.nan)
+rmse_catboost_val = catboost.get('rmse', np.nan)
+mape_baseline_val = baseline.get('mape', np.nan)
+mape_catboost_val = catboost.get('mape', np.nan)
+
+rmse_improvement = float('nan')
+if not pd.isna(rmse_baseline_val) and rmse_baseline_val != 0 and not pd.isna(rmse_catboost_val):
+    rmse_improvement = (rmse_baseline_val - rmse_catboost_val) / rmse_baseline_val
+
+mape_improvement = float('nan')
+if not pd.isna(mape_baseline_val) and mape_baseline_val != 0 and not pd.isna(mape_catboost_val):
+     mape_improvement = (mape_baseline_val - mape_catboost_val) / mape_baseline_val
+
+
 # --- Reusable Components ---
 header = html.Div([ # Use Div instead of H1 for easier styling control
     html.H2("GB Wind Day-Ahead Forecast", className="display-6"), # Smaller header
@@ -109,20 +124,34 @@ kpi_cards = dbc.Row( # Use Row with gutter class for spacing
     [
         dbc.Col(dbc.Card([
             dbc.CardHeader("Baseline RMSE"),
-            dbc.CardBody(html.H4(f"{baseline.get('rmse', 0):.0f} MW", className="card-title"))
+            # Add comma formatting to RMSE
+            dbc.CardBody(html.H4(f"{baseline.get('rmse', 0):,.0f} MW", className="card-title", id="baseline-rmse-val"))
         ], className="shadow-sm", style=kpi_card_style), lg=3, md=6), # Responsive widths
          dbc.Col(dbc.Card([
             dbc.CardHeader("Baseline MAPE"),
-            dbc.CardBody(html.H4(f"{baseline.get('mape', 0):.3f}", className="card-title"))
+             # Ensure 3 decimal places for MAPE
+            dbc.CardBody(html.H4(f"{baseline.get('mape', 0):.3f}", className="card-title", id="baseline-mape-val"))
         ], className="shadow-sm", style=kpi_card_style), lg=3, md=6),
-        dbc.Col(dbc.Card([
-            dbc.CardHeader("CatBoost RMSE"),
-            dbc.CardBody(html.H4(f"{catboost.get('rmse', 0):.0f} MW {rmse_icon_cb}", className="card-title"))
-        ], color=rmse_color_cb, inverse=True, className="shadow", style=kpi_card_style), lg=3, md=6),
-        dbc.Col(dbc.Card([
-            dbc.CardHeader("CatBoost MAPE"),
-            dbc.CardBody(html.H4(f"{catboost.get('mape', 0):.3f} {mape_icon_cb}", className="card-title"))
-        ], color=mape_color_cb, inverse=True, className="shadow", style=kpi_card_style), lg=3, md=6),
+        dbc.Col([ # Wrap Card in Div to attach Tooltip
+            dbc.Card([
+                dbc.CardHeader("CatBoost RMSE"),
+                dbc.CardBody(html.H4(f"{catboost.get('rmse', 0):,.0f} MW {rmse_icon_cb}", className="card-title")) # Comma format
+            ], id="catboost-rmse-card", color=rmse_color_cb, inverse=True, className="shadow", style=kpi_card_style),
+            dbc.Tooltip(
+                f"{rmse_improvement:+.0%} vs Baseline" if not pd.isna(rmse_improvement) else "Comparison N/A",
+                target="catboost-rmse-card", placement="top"
+            )
+        ], lg=3, md=6),
+        dbc.Col([ # Wrap Card in Div to attach Tooltip
+             dbc.Card([
+                dbc.CardHeader("CatBoost MAPE"),
+                dbc.CardBody(html.H4(f"{catboost.get('mape', 0):.3f} {mape_icon_cb}", className="card-title")) # Ensure 3 decimals
+            ], id="catboost-mape-card", color=mape_color_cb, inverse=True, className="shadow", style=kpi_card_style),
+             dbc.Tooltip(
+                 f"{mape_improvement:+.1%} vs Baseline" if not pd.isna(mape_improvement) else "Comparison N/A",
+                 target="catboost-mape-card", placement="top"
+            )
+        ], lg=3, md=6),
     ],
     className="g-4 mb-4", # Gutter spacing, margin bottom
 )

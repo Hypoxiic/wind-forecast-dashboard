@@ -13,27 +13,27 @@ Created as a portfolio piece to demonstrate data‑engineering, modelling, and p
 
 ---
 
-## Why do the day‑ahead results look “almost perfect”?
+## Why do the day‑ahead results look "almost perfect"?
 
-Wind‑generation forecasting is unusually forgiving at a 24‑‑48 h horizon because the two strongest predictors are both available:
+Wind‑generation forecasting is unusually forgiving at a 24‑‑48 h horizon because the two strongest predictors are both available:
 
 | Driver | Why it helps | Impact |
 |--------|--------------|--------|
-| **Day‑ahead hub‑height wind‑speed forecast** | Electrical output is a deterministic function of wind speed (turbine power curve).  Feeding the model tomorrow’s 100 m wind speed is essentially giving it tomorrow’s “cause.” | Explains 85‑95 % of MW variance by itself. |
-| **Yesterday’s observed output (lags & rolling means)** | Wind generation is highly autocorrelated at half‑hour resolution; the physical system can’t change instantaneously. | Acts as a safety‑net when the met forecast is slightly off and captures inertia/curtailment effects. |
+| **Day‑ahead hub‑height wind‑speed forecast** | Electrical output is a deterministic function of wind speed (turbine power curve).  Feeding the model tomorrow's 100 m wind speed is essentially giving it tomorrow's "cause." | Explains 85‑95 % of MW variance by itself. |
+| **Yesterday's observed output (lags & rolling means)** | Wind generation is highly autocorrelated at half‑hour resolution; the physical system can't change instantaneously. | Acts as a safety‑net when the met forecast is slightly off and captures inertia/curtailment effects. |
 
 Additional features (hour‑of‑day sine/cos, day‑of‑year seasonality, holiday flag) mop up the remaining systematic bias.
 
 ### Caveats
-* **Narrow back‑test** – our test slice is ≈ 4 weeks (Apr–May 2025).  No extreme storms or widespread curtailment occurred, so the relationship stayed clean.  
-* **No rolling cross‑validation yet** – a single 75 / 25 split can still hide regime‑specific error.
+* **Narrow back‑test** – our test slice is ≈ 4 weeks (Apr–May 2025).  No extreme storms or widespread curtailment occurred, so the relationship stayed clean.  
+* **No rolling cross‑validation yet** – a single 75 / 25 split can still hide regime‑specific error.
 
 ### Next safeguards
 * **TimeSeriesSplit cross‑validation** across the full year to expose seasonality and rare events.  
 * **Early‑stopping** during CatBoost training to curb variance.  
 * **Longer evaluation windows** (seasonal or yearly) before claiming production‑grade accuracy.
 
-In short, the model isn’t “cheating”; it’s simply leveraging very strong predictors at a short horizon. The planned cross‑validation step will confirm whether the low RMSE generalises across different weather regimes.
+In short, the model isn't "cheating"; it's simply leveraging very strong predictors at a short horizon. The planned cross‑validation step will confirm whether the low RMSE generalises across different weather regimes.
 
 ---
 
@@ -132,20 +132,22 @@ wind-forecast-dashboard/
 * Average feature importance logged.
 * *Status: Completed*
 
+**Phase 4 (Dashboard) –** `dashboard/app.py`
+* Basic structure with KPI cards and forecast plot.
+* Added Dash Bootstrap Components (DBC) and themes.
+* Implemented light/dark theme switching (ThemeSwitchAIO).
+* Added Error Distribution plot tab.
+* Polished UI: responsive layout, card styling, tooltips, number formatting.
+* *Status: Completed*
+
 ---
 
 ## 6. TODO / Next Steps
 
-* [ ] Expand feature set (rolling means, gusts, holiday flags) - *Some basic features already added*
-* [ ] Run patched model development notebook (`notebooks/03_model_dev.ipynb`) - *Superseded by train_model.py*
-    * [ ] Analyze feature importance - *Can add to train_model.py or a new notebook*
-    * [ ] Potentially tune CatBoost parameters
-    * [ ] Finalize model choice and save trained model artifact (e.g., `model.cbm`)
-* [ ] Refactor model training logic into `src/model.py` script - *Partially done in train_model.py*
-* [ ] Phase 4 – interactive Plotly Dash dashboard (live metrics & forecast plot)
-* [ ] Single-page Dash app (`dashboard/app.py`) with KPI cards & horizon slider - *Stub created*
-* [ ] `requirements.txt` + pre-commit hooks (black, ruff, isort)
+* [ ] Add pre-commit hooks (black, ruff, isort)
+* [ ] Finalize model choice and save trained model artifact (e.g., `model.cbm`)
 * [ ] GitHub Actions `retrain.yml` – nightly ETL → model retrain → dashboard redeploy
+* [ ] Deployment (e.g., Streamlit Cloud, Render)
 * [ ] Update README & docs after each phase
 
 ---
