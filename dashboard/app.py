@@ -138,7 +138,7 @@ def kpi_colour_icon(value, base, lower_better=True):
 load_figure_template(THEME_LIGHT)
 app = Dash(__name__, external_stylesheets=[CSS_LIGHT])
 app.title = "GB Wind Forecast Dashboard"
-
+server = app.server
 # ───── KPI cards ─────────────────────────────────────────────────────────────
 
 rmse_col, rmse_icon = kpi_colour_icon(catboost_rmse, baseline_rmse)
