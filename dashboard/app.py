@@ -1,3 +1,4 @@
+# Dash 3.0.4 bug: debug graph "top‑down" / "left‑right" labels swapped
 import json
 import pandas as pd
 import numpy as np
@@ -231,10 +232,15 @@ def update_layout_and_tab_content(toggle, active_tab, selected_series, start_dat
     template = template_theme1 if toggle else template_theme2
     load_figure_template(template) # Update plotly template
 
-    # Filter plot data based on date range
+    # ---- convert picker strings to Timestamps ----
+    start_ts = pd.to_datetime(start_date)
+    end_ts   = pd.to_datetime(end_date)
+    if pd.isna(start_ts) or pd.isna(end_ts):
+        raise exceptions.PreventUpdate
+
     date_filtered_data = plot_data_df[
-        (plot_data_df['datetime'] >= start_date) &
-        (plot_data_df['datetime'] <= end_date)
+        (plot_data_df['datetime'] >= start_ts) &
+        (plot_data_df['datetime'] <= end_ts)
     ]
 
     # Render active tab content
@@ -274,26 +280,29 @@ def update_layout_and_tab_content(toggle, active_tab, selected_series, start_dat
 
     elif active_tab == "tab-errors":
         # --- Create Error Distribution Plot ---
-        if 'wind_mw_pred' not in date_filtered_data.columns or date_filtered_data['wind_mw_pred'].isna().all():
-             tab_content = dbc.Alert("CatBoost predictions not available or not selected in date range.", color="warning")
-        else:
-            residuals = date_filtered_data["wind_mw"] - date_filtered_data["wind_mw_pred"]
-            residuals = residuals.dropna() # Drop NaNs if prediction is missing
-            if residuals.empty:
-                tab_content = dbc.Alert("No overlapping actual and prediction data in selected range.", color="warning")
-            else:
-                fig_errors = px.histogram(
-                    residuals,
-                    nbins=50,
-                    title=f"Distribution of CatBoost Prediction Errors ({start_date} to {end_date})",
-                    template=template # Use selected template
-                )
-                fig_errors.update_layout(xaxis_title="Error (MW)", yaxis_title="Frequency")
-                tab_content = dcc.Graph(figure=fig_errors)
-    else:
-        tab_content = html.P("This shouldn't be displayed") # Fallback
+        # Calculate residuals only on filtered data
+        residuals = date_filtered_data['wind_mw_pred'] - date_filtered_data['wind_mw']
+        residuals = residuals.dropna() # Drop NaNs if predictions or actuals are missing
 
-    return tab_content, template # Return content and the template name
+        if residuals.empty:
+            fig_errors = go.Figure().update_layout(title="No data available for error distribution", template=template)
+        else:
+            hist_color = "#2ecc71"
+            fig_errors = px.histogram(
+                residuals, nbins=50, title="Distribution of CatBoost Prediction Errors (MW)", template=template,
+                color_discrete_sequence=[hist_color]
+            )
+            fig_errors.update_layout(
+                xaxis_title="Prediction Error (Predicted - Actual) MW",
+                yaxis_title="Frequency",
+                bargap=0.1
+            )
+
+        tab_content = dcc.Graph(figure=fig_errors)
+    else:
+        tab_content = html.Div("Invalid tab selected")
+
+    return tab_content, template # Return standardized variable
 
 
 # --- Main Execution ---
