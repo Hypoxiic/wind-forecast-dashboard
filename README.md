@@ -98,7 +98,7 @@ wind-forecast-dashboard/
 
 ## 5. Current Progress
 
-**Phase 0 –** repo scaffold, GPT-4.1 prompts, README template
+**Phase 0 –** repo scaffold, README template
 
 **Phase 1 –** `src/etl.py`
 
