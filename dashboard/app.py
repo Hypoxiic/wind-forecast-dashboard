@@ -2,7 +2,7 @@ import json
 import pandas as pd
 import numpy as np
 from pathlib import Path
-from dash import Dash, dcc, html, Input, Output, State, ctx
+from dash import Dash, dcc, html, Input, Output, State, ctx, exceptions
 import plotly.express as px
 import plotly.graph_objects as go
 import dash_bootstrap_components as dbc
@@ -24,11 +24,11 @@ url_theme2 = dbc.themes.CYBORG
 try:
     with open(METRICS_PATH) as f:
         metrics = json.load(f)
-    baseline = metrics["baseline"]
-    catboost = metrics["catboost"]
+    baseline = metrics.get("baseline", {})
+    catboost = metrics.get("catboost", {})
 except FileNotFoundError:
-    baseline = {"rmse": float('nan'), "mape": float('nan')}
-    catboost = {"rmse": float('nan'), "mape": float('nan')}
+    baseline = {"rmse": np.nan, "mape": np.nan}
+    catboost = {"rmse": np.nan, "mape": np.nan}
 
 try:
     features_df = pd.read_parquet(FEATURES_PATH)
@@ -45,7 +45,7 @@ try:
 
 except FileNotFoundError:
     test_features_df = pd.DataFrame() # Handle case where features are missing
-    min_date = pd.Timestamp('today').date() - pd.Timedelta(days=7)
+    min_date = pd.Timestamp('today').date() - pd.Timedelta(days=30) # Default range if no data
     max_date = pd.Timestamp('today').date()
 
 
@@ -105,13 +105,15 @@ rmse_catboost_val = catboost.get('rmse', np.nan)
 mape_baseline_val = baseline.get('mape', np.nan)
 mape_catboost_val = catboost.get('mape', np.nan)
 
-rmse_improvement = float('nan')
+rmse_delta_text = "N/A"
 if not pd.isna(rmse_baseline_val) and rmse_baseline_val != 0 and not pd.isna(rmse_catboost_val):
     rmse_improvement = (rmse_baseline_val - rmse_catboost_val) / rmse_baseline_val
+    rmse_delta_text = f"Δ RMSE {rmse_improvement:+.0%} vs Baseline"
 
-mape_improvement = float('nan')
+mape_delta_text = "N/A"
 if not pd.isna(mape_baseline_val) and mape_baseline_val != 0 and not pd.isna(mape_catboost_val):
      mape_improvement = (mape_baseline_val - mape_catboost_val) / mape_baseline_val
+     mape_delta_text = f"Δ MAPE {mape_improvement:+.1%} vs Baseline"
 
 
 # --- Reusable Components ---
@@ -125,32 +127,26 @@ kpi_cards = dbc.Row( # Use Row with gutter class for spacing
         dbc.Col(dbc.Card([
             dbc.CardHeader("Baseline RMSE"),
             # Add comma formatting to RMSE
-            dbc.CardBody(html.H4(f"{baseline.get('rmse', 0):,.0f} MW", className="card-title", id="baseline-rmse-val"))
+            dbc.CardBody(html.H4(f"{baseline.get('rmse', 0):,.0f} MW", className="card-title"))
         ], className="shadow-sm", style=kpi_card_style), lg=3, md=6), # Responsive widths
          dbc.Col(dbc.Card([
             dbc.CardHeader("Baseline MAPE"),
              # Ensure 3 decimal places for MAPE
-            dbc.CardBody(html.H4(f"{baseline.get('mape', 0):.3f}", className="card-title", id="baseline-mape-val"))
+            dbc.CardBody(html.H4(f"{baseline.get('mape', 0):.3f}", className="card-title"))
         ], className="shadow-sm", style=kpi_card_style), lg=3, md=6),
         dbc.Col([ # Wrap Card in Div to attach Tooltip
             dbc.Card([
                 dbc.CardHeader("CatBoost RMSE"),
                 dbc.CardBody(html.H4(f"{catboost.get('rmse', 0):,.0f} MW {rmse_icon_cb}", className="card-title")) # Comma format
             ], id="catboost-rmse-card", color=rmse_color_cb, inverse=True, className="shadow", style=kpi_card_style),
-            dbc.Tooltip(
-                f"{rmse_improvement:+.0%} vs Baseline" if not pd.isna(rmse_improvement) else "Comparison N/A",
-                target="catboost-rmse-card", placement="top"
-            )
+            dbc.Tooltip(rmse_delta_text, target="catboost-rmse-card", placement="top")
         ], lg=3, md=6),
         dbc.Col([ # Wrap Card in Div to attach Tooltip
              dbc.Card([
                 dbc.CardHeader("CatBoost MAPE"),
                 dbc.CardBody(html.H4(f"{catboost.get('mape', 0):.3f} {mape_icon_cb}", className="card-title")) # Ensure 3 decimals
             ], id="catboost-mape-card", color=mape_color_cb, inverse=True, className="shadow", style=kpi_card_style),
-             dbc.Tooltip(
-                 f"{mape_improvement:+.1%} vs Baseline" if not pd.isna(mape_improvement) else "Comparison N/A",
-                 target="catboost-mape-card", placement="top"
-            )
+             dbc.Tooltip(mape_delta_text, target="catboost-mape-card", placement="top")
         ], lg=3, md=6),
     ],
     className="g-4 mb-4", # Gutter spacing, margin bottom
@@ -204,7 +200,7 @@ app.layout = dbc.Container(
     [
         dbc.Row([
             dbc.Col(header, width=10),
-            dbc.Col(ThemeSwitchAIO(aio_id="theme", themes=[url_theme1, url_theme2]), width=2, align="center")
+            dbc.Col(ThemeSwitchAIO(aio_id="theme", themes=[url_theme1, url_theme2], switch_props={"style": {"marginTop": "15px"}}), width=2, align="center")
         ]),
         kpi_cards,
         controls,
