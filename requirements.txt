@@ -11,3 +11,4 @@ dash>=2.10,<3.0      # Dashboard app
 plotly>=5.10,<6.0     # Dashboard plotting
 dash-bootstrap-components>=1.6,<2.0 # For layout and components
 dash-bootstrap-templates>=1.1.0,<2.0 # For themes and ThemeSwitchAIO 
+gunicorn 
