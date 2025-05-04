@@ -1,6 +1,6 @@
 # Wind Day‑Ahead Forecast & Dashboard
 
-*A concise, fully‑reproducible mini‑project that forecasts **day‑ahead Great‑Britain wind generation (MW)** and serves the results through a lightweight Plotly‑Dash app.*  Originally built as a portfolio piece – now a polished tutorial repo.
+*A concise, fully‑reproducible mini‑project that forecasts **day‑ahead Great‑Britain wind generation (MW)** and serves the results through a lightweight Plotly‑Dash app.*
 
 ---
 
