@@ -70,6 +70,17 @@ def engineer_features(eso: pd.DataFrame, met: pd.DataFrame) -> pd.DataFrame:
         tolerance=pd.Timedelta("30min"),
     ).sort_values("datetime").reset_index(drop=True)
 
+    # ─── Power curve proxies ──────────
+    # Moved from train_model.py for consistency
+    RATED_MS = 15.0
+    if "wind_speed_10m" in df.columns:
+        df["wind_speed_v3"]      = df["wind_speed_10m"] ** 3
+        df["wind_speed_v3_clip"] = np.clip(df["wind_speed_10m"], 0, RATED_MS) ** 3
+    else:
+        # Add columns as NaN if base speed column is missing after merge (shouldn't happen ideally)
+        df["wind_speed_v3"] = np.nan
+        df["wind_speed_v3_clip"] = np.nan
+
     # ─── lags ─────────────────────────
     lag_steps = {   # step : label
         1  : "30m",
@@ -103,9 +114,14 @@ def engineer_features(eso: pd.DataFrame, met: pd.DataFrame) -> pd.DataFrame:
     uk_holidays = UnitedKingdom()
     df["is_holiday"] = df["datetime"].dt.date.isin(uk_holidays).astype(int)
 
-    # drop rows containing NaNs introduced by lags/rolls
+    # drop rows containing NaNs introduced by lags/rolls OR missing wind_perc
+    # Note: This might still be aggressive if input has many NaNs
+    initial_rows = len(df)
     df = df.dropna().reset_index(drop=True)
-    logging.info("Feature dataframe shape after engineering: %s", df.shape)
+    final_rows = len(df)
+    logging.info(
+        f"Feature dataframe shape after engineering: {df.shape} (dropped {initial_rows - final_rows} rows)"
+    )
 
     return df
 

@@ -61,15 +61,13 @@ df = pd.read_parquet(FEAT_PATH)
 df["datetime"] = pd.to_datetime(df["datetime"], utc=True)
 logging.info(f"Data shape: {df.shape}")
 
-# Power‑curve proxies (Keep these as they use wind_speed_ms)
-RATED_MS = 15.0
-df["wind_speed_v3"]      = df["wind_speed_10m"] ** 3
-df["wind_speed_v3_clip"] = np.clip(df["wind_speed_10m"], 0, RATED_MS) ** 3
+# REMOVED Power‑curve proxies calculation (Moved to featurise.py)
+# RATED_MS = 15.0
+# df["wind_speed_v3"]      = df["wind_speed_10m"] ** 3
+# df["wind_speed_v3_clip"] = np.clip(df["wind_speed_10m"], 0, RATED_MS) ** 3
 
 # REMOVED Capacity‑factor target calculation
 # capacity_mw          = df["wind_mw"].max()
-# df["capacity_factor"] = df["wind_mw"] / capacity_mw
-# logging.info(f"Calculated max capacity (approx): {capacity_mw:.1f} MW")
 
 TARGET        = "wind_perc"  # <-- CHANGED target
 CAT_FEATURES  = ["is_holiday"]
