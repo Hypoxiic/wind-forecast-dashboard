@@ -51,29 +51,49 @@ ESO_URL = (
 # 1.  ESO WIND CSV (robust to zip / gzip)
 # --------------------------------------------------------------------------- #
 
+
+def _robust_read_csv(handle: io.BufferedIOBase) -> pd.DataFrame:
+    """Try fast parser, fall back to python engine if needed."""
+    try:
+        return pd.read_csv(handle)
+    except pd.errors.ParserError:
+        handle.seek(0)
+        return pd.read_csv(
+            handle,
+            engine="python",
+            on_bad_lines="skip",  # ignore any malformed rows
+        )
+
 def _read_csv_bytes(buf: bytes) -> pd.DataFrame:
     """
-    Take raw bytes that are either:
-    • plain CSV text
-    • gz compressed CSV
-    • a ZIP archive with exactly one CSV inside
-    and return a DataFrame.
+    Accept raw bytes from ESO download.
+    Handles:
+        • ZIP with one CSV inside
+        • GZIP‑compressed CSV
+        • Plain CSV
+    Falls back to Python engine when the fast parser chokes.
+    Refuses HTML pages (common when ESO asks you to log in).
     """
-    # ZIP?
+    # 1️⃣  Block HTML masquerading as CSV
+    if b"<html" in buf[:200].lower():
+        raise ValueError("ESO download returned HTML, not CSV – is the URL still public?")
+
+    # 2️⃣  ZIP archive?
     if buf[:2] == b"PK":
         with zipfile.ZipFile(io.BytesIO(buf)) as z:
             csv_members = [n for n in z.namelist() if n.endswith(".csv")]
             if not csv_members:
-                raise ValueError("ZIP from ESO contains no .csv file!")
+                raise ValueError("ZIP contains no CSV file")
             with z.open(csv_members[0]) as f:
-                return pd.read_csv(f)
+                return _robust_read_csv(f)
 
-    # GZIP?
+    # 3️⃣  GZIP?
     if buf[:2] == b"\x1f\x8b":
-        return pd.read_csv(io.BytesIO(buf), compression="gzip")
+        return _robust_read_csv(io.BytesIO(buf))  # pandas auto‑detects gzip
 
-    # Plain text CSV
-    return pd.read_csv(io.BytesIO(buf))
+    # 4️⃣  Plain CSV bytes
+    return _robust_read_csv(io.BytesIO(buf))
+
 
 
 def fetch_eso_csv() -> pd.DataFrame:
