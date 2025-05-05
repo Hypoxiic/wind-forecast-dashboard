@@ -58,15 +58,15 @@ def _make_request(url: str, params: dict | None = None, headers: dict | None = N
         raise # Re-raise exception to trigger tenacity retry
 
 # ---------- Carbon‑Intensity Wind Percentage (Yesterday) ------------------- #
-def fetch_ci_wind_perc_yesterday(today: date) -> pd.DataFrame:
+def fetch_ci_wind_perc_history(today: date, days_history: int = 3) -> pd.DataFrame:
     """
-    Fetches yesterday's wind generation percentage from the Carbon Intensity API.
+    Fetches wind generation percentage for the specified number of past days.
     """
-    yesterday_start = today - timedelta(days=1)
-    # API provides data in 30-min intervals. Fetching up to 23:30Z covers the day.
-    # Note: The API might adjust the 'from'/'to' slightly to match its intervals.
-    from_dt_str = yesterday_start.strftime('%Y-%m-%dT00:00Z')
-    to_dt_str = yesterday_start.strftime('%Y-%m-%dT23:30Z') # Ensure we get the last interval
+    start_date = today - timedelta(days=days_history)
+    end_date = today - timedelta(days=1) # Fetch up to the end of yesterday
+
+    from_dt_str = start_date.strftime('%Y-%m-%dT00:00Z')
+    to_dt_str = end_date.strftime('%Y-%m-%dT23:30Z') # Ensure we get the last interval of yesterday
 
     url = f"{CI_API_BASE_URL}/generation/{from_dt_str}/{to_dt_str}"
     logging.info(f"Fetching Carbon Intensity generation data from: {url}")
@@ -100,7 +100,7 @@ def fetch_ci_wind_perc_yesterday(today: date) -> pd.DataFrame:
             rows.append({"datetime": ts, "wind_perc": float('nan')}) # Or use 0 if preferred
 
     if not rows:
-        logging.warning("No valid wind percentage data found for yesterday.")
+        logging.warning(f"No valid wind percentage data found for the period {start_date} to {end_date}.")
         return pd.DataFrame(columns=["datetime", "wind_perc"])
 
     df = pd.DataFrame(rows)
@@ -109,14 +109,15 @@ def fetch_ci_wind_perc_yesterday(today: date) -> pd.DataFrame:
     return df
 
 # ---------- Open‑Meteo Weather Fetchers (Unchanged from original) ---------- #
-def fetch_weather_yesterday(today: date) -> pd.DataFrame:
-    """Fetches yesterday's hourly weather data from Open-Meteo."""
-    yesterday = today - timedelta(days=1)
+def fetch_weather_history(today: date, days_history: int = 3) -> pd.DataFrame:
+    """Fetches past hourly weather data from Open-Meteo."""
+    start_date = today - timedelta(days=days_history)
+    end_date = today - timedelta(days=1)
     url = (
         f"{OM_ARCHIVE_URL}?latitude={LAT}&longitude={LON}"
-        f"&hourly={HOURLY_VARS}&start_date={yesterday}&end_date={yesterday}&timezone=UTC"
+        f"&hourly={HOURLY_VARS}&start_date={start_date}&end_date={end_date}&timezone=UTC"
     )
-    logging.info(f"Fetching yesterday's weather from Open-Meteo: {url}")
+    logging.info(f"Fetching past weather from Open-Meteo: {url}")
     try:
         js = _make_request(url)
         if "hourly" not in js or "time" not in js["hourly"]:
@@ -127,7 +128,7 @@ def fetch_weather_yesterday(today: date) -> pd.DataFrame:
         df["datetime"] = pd.to_datetime(df["datetime"], utc=True)
         return df
     except Exception as e:
-        logging.error(f"Failed to fetch yesterday's weather: {e}")
+        logging.error(f"Failed to fetch past weather: {e}")
         return pd.DataFrame()
 
 
@@ -163,21 +164,22 @@ def main():
     start_time = time.time()
     today = date.today()
     logging.info(f"Starting inference ETL run for {today}")
+    days_needed_history = 3 # Fetch yesterday + 2 prior days for 48h lag
 
     # --- Fetch Data ---
-    logging.info("Fetching Carbon Intensity wind percentage (yesterday)...")
-    wind_perc_df = fetch_ci_wind_perc_yesterday(today)
+    logging.info(f"Fetching Carbon Intensity wind percentage ({days_needed_history} days history)...")
+    wind_perc_df = fetch_ci_wind_perc_history(today, days_needed_history)
     if wind_perc_df.empty:
         logging.error("Failed to get wind percentage data. Aborting.")
         return
     logging.info(f"Fetched {len(wind_perc_df)} rows of wind percentage data.")
 
-    logging.info("Fetching Open‑Meteo weather (yesterday)...")
-    meteo_yesterday_df = fetch_weather_yesterday(today)
-    if meteo_yesterday_df.empty:
-        logging.error("Failed to get yesterday's weather data. Aborting.")
+    logging.info(f"Fetching Open‑Meteo weather ({days_needed_history} days history)...")
+    meteo_history_df = fetch_weather_history(today, days_needed_history)
+    if meteo_history_df.empty:
+        logging.error("Failed to get historical weather data. Aborting.")
         return
-    logging.info(f"Fetched {len(meteo_yesterday_df)} rows of yesterday's weather.")
+    logging.info(f"Fetched {len(meteo_history_df)} rows of historical weather.")
 
     logging.info("Fetching Open‑Meteo weather (forecast 48h)...")
     meteo_forecast_df = fetch_weather_forecast(today)
@@ -187,14 +189,12 @@ def main():
     logging.info(f"Fetched {len(meteo_forecast_df)} rows of forecast weather.")
 
     # --- Combine Weather Data ---
-    # Ensure columns match before concat if necessary (should be same from API)
-    meteo_df = pd.concat([meteo_yesterday_df, meteo_forecast_df], ignore_index=True)
+    meteo_df = pd.concat([meteo_history_df, meteo_forecast_df], ignore_index=True)
+    meteo_df = meteo_df.drop_duplicates(subset=["datetime"], keep="last") # Keep forecast if overlap
     meteo_df = meteo_df.sort_values("datetime").reset_index(drop=True)
     logging.info(f"Combined weather data shape: {meteo_df.shape}")
 
     # --- Save Data ---
-    # IMPORTANT: Saving wind percentage data to the file expected by featurise.py
-    #            Remember that the *content* is different (perc vs MW).
     logging.info(f"Saving wind percentage data to {WIND_OUT_PATH}")
     wind_perc_df.to_parquet(WIND_OUT_PATH, index=False)
 
