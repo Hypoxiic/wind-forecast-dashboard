@@ -1,129 +1,155 @@
 """
-src/etl.py
-Phase 1 – Data acquisition for GB wind day‑ahead forecast project
----------------------------------------------------------------
-• Pull half‑hourly wind generation (historic) from National Grid ESO
-• Pull day‑ahead wind‑speed forecast from Open‑Meteo (100 m hub height)
-• Save both as parquet under data/raw/
+ETL helpers for the nightly wind‑forecast pipeline.
 
-Run:  python src/etl.py
+* ESO CSV (historic wind generation)
+* Open‑Meteo archive API, fetched month‑by‑month with retry + local cache
 """
 
 from __future__ import annotations
-import io, time, logging, datetime as dt
+
+import os
+import time
+from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import List
 
 import pandas as pd
 import requests
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
-# --------------------------------------------------
-logging.basicConfig(level=logging.INFO,
-                    format="%(asctime)s %(levelname)s: %(message)s")
+# --------------------------------------------------------------------------- #
+# Configuration – tweak here not in the code body
+# --------------------------------------------------------------------------- #
 
-RAW_DIR = Path("data/raw")
-RAW_DIR.mkdir(parents=True, exist_ok=True)
+# Where to save raw + cached files
+DATA_DIR   = Path("data")
+ESO_CSV    = DATA_DIR / "eso" / "wind_uk.csv"         # 15‑min ESO metered wind
+METEO_DIR  = DATA_DIR / "meteo"                       # monthly archive parquet files
 
-# National Grid ESO CSV (single file with all years)
-NG_ESO_URL = (
-    "https://api.neso.energy/dataset/88313ae5-94e4-4ddc-a790-593554d8c6b9/"
-    "resource/f93d1835-75bc-43e5-84ad-12472b180a98/download/df%5Ffuel%5Fckan.csv"
+# Open‑Meteo parameters – change lat/lon to your location
+LAT, LON   = 54.0, -1.5
+METEO_VARS = "temperature_2m,wind_speed_10m"
+
+# Chunk size for archive calls – 30 keeps us well within 31‑day limit
+CHUNK_DAYS = 30
+
+# --------------------------------------------------------------------------- #
+# 1.  ESO WIND CSV
+# --------------------------------------------------------------------------- #
+
+ESO_URL = (
+    "https://data.nationalgrideso.com/system/energy-supply/dataset/"
+    "wind-and-solar-generation/download"
 )
 
-# Open‑Meteo hourly forecast (100 m wind speed)
-LAT, LON = 54.0, -1.0  # Dogger Bank area
-OPEN_METEO_BASE = (
-    "https://api.open-meteo.com/v1/forecast"
-    f"?latitude={LAT}&longitude={LON}"
-    "&hourly=wind_speed_100m"
-    "&timezone=Europe/London"
+def fetch_eso_csv() -> pd.DataFrame:
+    """Download ESO wind CSV if not present / outdated."""
+    ESO_CSV.parent.mkdir(parents=True, exist_ok=True)
+
+    # Download if file missing or older than 24 h
+    if not ESO_CSV.exists() or (time.time() - ESO_CSV.stat().st_mtime) > 86_400:
+        print("Downloading ESO wind CSV …")
+        r = requests.get(ESO_URL, timeout=60)
+        r.raise_for_status()
+        ESO_CSV.write_bytes(r.content)
+
+    df = pd.read_csv(ESO_CSV)
+    df.rename(columns=str.lower, inplace=True)
+    return df
+
+
+# --------------------------------------------------------------------------- #
+# 2.  OPEN‑METEO ARCHIVE (chunked, cached, retried)
+# --------------------------------------------------------------------------- #
+
+ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
+
+
+@retry(
+    reraise=True,
+    stop=stop_after_attempt(4),
+    wait=wait_exponential(multiplier=2, min=2, max=20),
+    retry=retry_if_exception_type(requests.exceptions.RequestException),
 )
-
-# --------------------------------------------------
-def fetch_eso_wind(retries: int = 3, delay: int = 5) -> pd.DataFrame:
-    """Download and clean the ESO generation CSV (half‑hourly MW)."""
-    for a in range(1, retries + 1):
-        try:
-            logging.info("Downloading ESO wind CSV …")
-            csv_bytes = requests.get(NG_ESO_URL, timeout=60).content
-
-            rows = csv_bytes.decode("utf‑8", errors="ignore").splitlines()
-            header_idx = next(i for i, r in enumerate(rows)
-                              if r.lower().startswith("datetime"))
-            clean_csv = "\n".join(rows[header_idx:])
-
-            df = (
-                pd.read_csv(io.StringIO(clean_csv),
-                            engine="python", on_bad_lines="skip")
-                  .rename(str.lower, axis=1)
-                  .loc[:, ["datetime", "wind"]]
-                  .rename(columns={"wind": "wind_mw"})
-            )
-            df["datetime"] = pd.to_datetime(df["datetime"], utc=True)
-            logging.info("ESO rows: %s", len(df))
-            return df
-        except Exception as e:
-            logging.warning("ESO fetch failed (%s/%s): %s", a, retries, e)
-            if a < retries:
-                time.sleep(delay)
-            else:
-                raise
-
-def fetch_openmeteo(start: str, end: str,
-                    retries: int = 3, delay: int = 5) -> pd.DataFrame:
-    """Download Open‑Meteo historical forecast and upsample to 30 min."""
-    url = f"{OPEN_METEO_BASE}&start_date={start}&end_date={end}"
-    for a in range(1, retries + 1):
-        try:
-            logging.info("Downloading Open‑Meteo JSON %s → %s …", start, end)
-            js = requests.get(url, timeout=90).json()
-            times = js["hourly"]["time"]
-            speed = js["hourly"]["wind_speed_100m"]
-
-            df = pd.DataFrame({
-                "datetime": (
-                    pd.to_datetime(times)
-                        .tz_localize("Europe/London", nonexistent="shift_forward",
-                            ambiguous="NaT")
-                            .tz_convert("UTC")                     # no .dt here
-                ),
-                "wind_speed_ms": speed,
-            }).dropna()
-
-            # Hourly → 30 min
-            # make datetime the index
-            df = df.set_index("datetime")
-
-            # 1️⃣ drop any duplicate timestamps (keep the first copy)
-            df = df[~df.index.duplicated(keep="first")]
-
-            # 2️⃣ upsample from 1 h to 30 min and forward‑fill
-            df = (
-                df.resample("30min")      # “30T” is deprecated; use “30min”
-                    .ffill()
-                    .reset_index()
-                )
-            logging.info("Open‑Meteo rows: %s", len(df))
-            return df
-        except Exception as e:
-            logging.warning("Open‑Meteo fetch failed (%s/%s): %s", a, retries, e)
-            if a < retries:
-                time.sleep(delay)
-            else:
-                raise
-
-# --------------------------------------------------
-def main() -> None:
-    eso_df = fetch_eso_wind()
-
-    start_date = "2024-01-01"
-    end_date = dt.datetime.utcnow().strftime("%Y‑%m‑%d")
-    meteo_df = fetch_openmeteo(start_date, end_date)
-
-    (RAW_DIR / "eso_wind.parquet").write_bytes(eso_df.to_parquet(index=False))
-    (RAW_DIR / "openmeteo_weather.parquet").write_bytes(
-        meteo_df.to_parquet(index=False)
+def _fetch_archive_chunk(day0: date, day1: date) -> pd.DataFrame:
+    """Fetch a ≤31‑day window from the archive endpoint (with retry)."""
+    url = (
+        f"{ARCHIVE_URL}"
+        f"?latitude={LAT}&longitude={LON}"
+        f"&hourly={METEO_VARS}"
+        f"&start_date={day0}&end_date={day1}"
+        "&timezone=UTC"
     )
-    logging.info("Saved parquet files to %s", RAW_DIR.resolve())
+    r = requests.get(url, timeout=90)
+    r.raise_for_status()
+    js = r.json()
+
+    if "hourly" not in js:
+        raise ValueError(f"Open‑Meteo response missing 'hourly' key: {js}")
+
+    return pd.DataFrame(js["hourly"])
+
+
+def _month_cache_path(day: date) -> Path:
+    """Return e.g. data/meteo/2025-05.parquet"""
+    METEO_DIR.mkdir(parents=True, exist_ok=True)
+    return METEO_DIR / f"{day:%Y-%m}.parquet"
+
+
+def _fetch_or_load_month(year: int, month: int) -> pd.DataFrame:
+    """Load the month from cache or fetch it (and then cache)."""
+    first = date(year, month, 1)
+    cache = _month_cache_path(first)
+
+    if cache.exists():
+        return pd.read_parquet(cache)
+
+    # Determine last day of month
+    nxt = (first.replace(day=28) + timedelta(days=4)).replace(day=1)  # first of next month
+    last = nxt - timedelta(days=1)
+
+    print(f"  · Fetching {first:%Y‑%m} …")  # nice progress print
+    df = _fetch_archive_chunk(first, last)
+    df.to_parquet(cache, index=False)
+    return df
+
+
+def fetch_openmeteo_archive(start: date, end: date) -> pd.DataFrame:
+    """Return concatenated hourly dataframe for full [start, end] range."""
+    dfs: List[pd.DataFrame] = []
+    cur = start
+
+    while cur <= end:
+        dfs.append(_fetch_or_load_month(cur.year, cur.month))
+        # jump to 1st of next month
+        cur = (cur.replace(day=28) + timedelta(days=4)).replace(day=1)
+
+    out = pd.concat(dfs, ignore_index=True)
+    # Keep only requested interval (e.g. if start is mid‑month)
+    mask = (out["time"] >= str(start)) & (out["time"] <= str(end))
+    return out.loc[mask].reset_index(drop=True)
+
+
+# --------------------------------------------------------------------------- #
+# 3.  MAIN ENTRY
+# --------------------------------------------------------------------------- #
+
+def main() -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Orchestrate downloads – called from src/pipeline.py."""
+    print("Downloading ESO data …")
+    eso_df = fetch_eso_csv()
+    print(f"ESO rows: {len(eso_df):,}")
+
+    # determine date span to fetch (archive endpoint goes back to 1940)
+    start_date = date(2024, 1, 1)         # <- adjust earliest date you need
+    end_date   = date.today()
+
+    print(f"Downloading Open‑Meteo archive {start_date} → {end_date} …")
+    meteo_df   = fetch_openmeteo_archive(start_date, end_date)
+    print(f"Open‑Meteo rows: {len(meteo_df):,}")
+
+    return eso_df, meteo_df
+
 
 if __name__ == "__main__":
     main()
