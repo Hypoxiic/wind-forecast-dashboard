@@ -4,7 +4,7 @@ import pandas as pd
 from catboost import CatBoostRegressor
 from catboost import Pool
 
-FEAT   = Path("data/features/features.parquet")
+FEAT   = Path("data/features/for_predict.parquet")
 MODEL  = Path("models/model.cbm")
 OUTDIR = Path("data/predictions"); OUTDIR.mkdir(parents=True, exist_ok=True)
 
