@@ -150,8 +150,9 @@ def fetch_openmeteo_archive(start: date, end: date) -> pd.DataFrame:
 # --------------------------------------------------------------------------- #
 
 def main() -> tuple[pd.DataFrame, pd.DataFrame]:
-    start_date = date(2024, 1, 1)   # earliest you want
+    #start_date = date(2024, 1, 1)   # earliest you want
     end_date   = date.today()
+    start_date = end_date - timedelta(days=60)   # 🔸 was date(2024, 1, 1)
 
     print("Fetching Carbon‑Intensity wind …")
     wind_df  = fetch_wind_ci(start_date, end_date)
