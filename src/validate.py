@@ -17,7 +17,7 @@ DATA_DIR = Path("data")
 FEATURES_PATH = DATA_DIR / "features" / "features.parquet"
 CV_METRICS_PATH = Path("cv_metrics.json") # Save CV metrics in root directory
 
-TARGET = "wind_mw"
+TARGET = "wind_perc"
 N_SPLITS = 5
 TEST_FRACTION = 0.15 # Approximate test size for TimeSeriesSplit test_size calculation
 EARLY_STOPPING_ROUNDS = 50
@@ -34,7 +34,7 @@ df = df.sort_values("datetime").reset_index(drop=True) # Ensure sorted for CV
 logging.info(f"Loaded DataFrame shape: {df.shape}")
 
 # Define features (X) and target (y)
-FEATURES = [col for col in df.columns if col not in ["datetime", TARGET]]
+FEATURES = [col for col in df.columns if col not in ["datetime", "wind_mw", TARGET]]
 X, y = df[FEATURES], df[TARGET]
 
 # --- Time Series Cross-Validation ---
@@ -75,31 +75,31 @@ for fold, (train_idx, val_idx) in enumerate(tscv.split(X)):
     mape = mean_absolute_percentage_error(y_val, y_pred)
     rmse = mean_squared_error(y_val, y_pred) ** 0.5
 
-    logging.info(f"Fold {fold+1} MAPE: {mape:.4f}, RMSE: {rmse:.2f}")
-    fold_metrics["mape"].append(mape)
-    fold_metrics["rmse"].append(rmse)
+    logging.info(f"Fold {fold+1} MAPE (perc): {mape:.4f}, RMSE (perc): {rmse:.4f}")
+    fold_metrics["mape_perc"].append(mape)
+    fold_metrics["rmse_perc"].append(rmse)
 
     # Store feature importance for this fold
     feature_importances[f'fold_{fold+1}'] = model.get_feature_importance()
 
 # --- Aggregate Results ---
 logging.info("--- CV Results ---")
-mean_mape = np.mean(fold_metrics["mape"])
-std_mape = np.std(fold_metrics["mape"])
-mean_rmse = np.mean(fold_metrics["rmse"])
-std_rmse = np.std(fold_metrics["rmse"])
+mean_mape = np.mean(fold_metrics["mape_perc"])
+std_mape = np.std(fold_metrics["mape_perc"])
+mean_rmse = np.mean(fold_metrics["rmse_perc"])
+std_rmse = np.std(fold_metrics["rmse_perc"])
 
-logging.info(f"Mean MAPE: {mean_mape:.4f} ± {std_mape:.4f}")
-logging.info(f"Mean RMSE: {mean_rmse:.2f} ± {std_rmse:.2f}")
+logging.info(f"Mean MAPE (perc): {mean_mape:.4f} ± {std_mape:.4f}")
+logging.info(f"Mean RMSE (perc): {mean_rmse:.4f} ± {std_rmse:.4f}")
 
 cv_results = {
-    "mean_mape": mean_mape,
-    "std_mape": std_mape,
-    "mean_rmse": mean_rmse,
-    "std_rmse": std_rmse,
+    "mean_mape_perc": mean_mape,
+    "std_mape_perc": std_mape,
+    "mean_rmse_perc": mean_rmse,
+    "std_rmse_perc": std_rmse,
     "folds": {
-        "mape": fold_metrics["mape"],
-        "rmse": fold_metrics["rmse"]
+        "mape_perc": fold_metrics["mape_perc"],
+        "rmse_perc": fold_metrics["rmse_perc"]
     }
 }
 

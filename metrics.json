@@ -1,35 +1,16 @@
 {
-    "holdout_rmse_mw": 298.7640962870085,
-    "holdout_mape": 0.02590464917966223,
-    "capacity_mw_approx": 16971.0,
-    "optuna_best_cv_rmse": 234.93879531667463,
-    "optuna_n_trials": 75,
-    "optuna_best_params_raw": {
-        "bootstrap_type": "Bayesian",
-        "iterations": 3596,
-        "depth": 10,
-        "lr": 0.027460336881992318,
-        "l2": 1.6012927542764996,
-        "subsample": 0.7069260172874948,
-        "boosting_type": "Ordered",
-        "random_strength": 0.004105089444054274,
-        "border_count": 148,
-        "bagging_temperature": 0.13715638379335676
-    },
-    "final_model_params": {
-        "bootstrap_type": "Bayesian",
-        "iterations": 3596,
-        "depth": 10,
-        "boosting_type": "Ordered",
-        "random_strength": 0.004105089444054274,
-        "border_count": 148,
-        "bagging_temperature": 0.13715638379335676,
-        "learning_rate": 0.027460336881992318,
-        "l2_leaf_reg": 1.6012927542764996,
-        "loss_function": "RMSE",
-        "task_type": "GPU",
-        "devices": "0",
-        "random_state": 42,
-        "verbose": 200
+    "optuna_best_cv_rmse": 1.2775184205209487,
+    "holdout_rmse_perc": 0.9576234005935763,
+    "holdout_mape_perc": 0.014973411868199386,
+    "best_params": {
+        "bootstrap_type": "Bernoulli",
+        "iterations": 2899,
+        "depth": 7,
+        "lr": 0.1290086754090022,
+        "l2": 11.113166000205418,
+        "subsample": 0.6637487515196121,
+        "boosting_type": "Plain",
+        "random_strength": 0.00013260320344589828,
+        "border_count": 235
     }
 }

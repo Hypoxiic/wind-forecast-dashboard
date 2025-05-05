@@ -79,14 +79,14 @@ def engineer_features(eso: pd.DataFrame, met: pd.DataFrame) -> pd.DataFrame:
         96 : "48h",
     }
     for steps, label in lag_steps.items():
-        df[f"wind_mw_lag_{label}"]      = df["wind_mw"].shift(steps)
-        df[f"wind_speed_lag_{label}"]   = df["wind_speed_ms"].shift(steps)
+        df[f"wind_perc_lag_{label}"]      = df["wind_perc"].shift(steps)
+        df[f"wind_speed_lag_{label}"]   = df["wind_speed_10m"].shift(steps)
 
     # ─── rolling stats on wind‑speed ─
     roll_steps = {6: "3h", 48: "24h", 96: "48h"}  # windows in 30‑min steps
     for steps, label in roll_steps.items():
-        df[f"wind_speed_roll_mean_{label}"] = df["wind_speed_ms"].rolling(steps).mean()
-        df[f"wind_speed_roll_std_{label}"]  = df["wind_speed_ms"].rolling(steps).std()
+        df[f"wind_speed_roll_mean_{label}"] = df["wind_speed_10m"].rolling(steps).mean()
+        df[f"wind_speed_roll_std_{label}"]  = df["wind_speed_10m"].rolling(steps).std()
 
     # ─── calendar & cycles ────────────
     df["hour"]      = df["datetime"].dt.hour

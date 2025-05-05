@@ -45,11 +45,13 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(mes
 DATA_DIR   = Path("data")
 FEAT_PATH  = DATA_DIR / "features" / "features.parquet"
 PRED_DIR   = DATA_DIR / "predictions"
+MODELS_DIR = Path("models")
+MODELS_DIR.mkdir(parents=True, exist_ok=True)
 PRED_DIR.mkdir(parents=True, exist_ok=True)
 
 METRICS_PATH = Path("metrics.json")
-MODEL_PATH   = Path("model.cbm")
-STUDY_PATH   = Path("optuna_study_gpu.pkl")
+MODEL_PATH   = MODELS_DIR / "model.cbm"
+STUDY_PATH   = MODELS_DIR / "optuna_study_gpu.pkl"
 
 # ──────────────────────────
 # Load & enrich features
@@ -59,18 +61,19 @@ df = pd.read_parquet(FEAT_PATH)
 df["datetime"] = pd.to_datetime(df["datetime"], utc=True)
 logging.info(f"Data shape: {df.shape}")
 
-# Power‑curve proxies
+# Power‑curve proxies (Keep these as they use wind_speed_ms)
 RATED_MS = 15.0
-df["wind_speed_v3"]      = df["wind_speed_ms"] ** 3
-df["wind_speed_v3_clip"] = np.clip(df["wind_speed_ms"], 0, RATED_MS) ** 3
+df["wind_speed_v3"]      = df["wind_speed_10m"] ** 3
+df["wind_speed_v3_clip"] = np.clip(df["wind_speed_10m"], 0, RATED_MS) ** 3
 
-# Capacity‑factor target
-capacity_mw          = df["wind_mw"].max()
-df["capacity_factor"] = df["wind_mw"] / capacity_mw
-logging.info(f"Calculated max capacity (approx): {capacity_mw:.1f} MW")
+# REMOVED Capacity‑factor target calculation
+# capacity_mw          = df["wind_mw"].max()
+# df["capacity_factor"] = df["wind_mw"] / capacity_mw
+# logging.info(f"Calculated max capacity (approx): {capacity_mw:.1f} MW")
 
-TARGET        = "capacity_factor"
+TARGET        = "wind_perc"  # <-- CHANGED target
 CAT_FEATURES  = ["is_holiday"]
+# <-- CHANGED features list to exclude wind_mw and the new target wind_perc
 FEATURES      = [c for c in df.columns if c not in {"datetime", "wind_mw", TARGET}]
 logging.info(f"Using {len(FEATURES)} features.")
 
@@ -155,9 +158,9 @@ def objective(trial: optuna.Trial) -> float:
             logging.error(f"Trial failed (fold {fold + 1}): {e}")
             return float("inf")
 
-        pred_cf = model.predict(X.iloc[test_idx])
+        pred_perc = model.predict(X.iloc[test_idx]) # <-- RENAMED pred_cf to pred_perc
         mse  = mean_squared_error(
-            y.iloc[test_idx] * capacity_mw, pred_cf * capacity_mw
+            y.iloc[test_idx], pred_perc
         )
         rmse = mse ** 0.5
         rmses.append(rmse)
@@ -181,7 +184,6 @@ logging.info(f"Best params: {best_params_optuna}")
 # Save study (optional)
 try:
     import joblib
-
     joblib.dump(study, STUDY_PATH)
 except Exception as e:
     logging.warning(f"Could not save Optuna study: {e}")
@@ -203,7 +205,8 @@ if final_params.get("bootstrap_type") == "Bayesian":
 
 final_params.update(
     {
-        "loss_function": "RMSE",
+        "loss_function": "RMSE", # Now RMSE of percentage
+        "eval_metric": "RMSE",   # Now RMSE of percentage
         "task_type": "GPU",
         "devices": "0",
         "random_state": 42,
@@ -226,14 +229,13 @@ model = CatBoostRegressor(**final_params)
 model.fit(Pool(X_train_full, y_train_full, cat_features=CAT_FEATURES))
 
 # -------- new: save predictions for the *entire* feature set --------
-full_pred_cf = model.predict(X)            # X == all data
-full_pred_mw = full_pred_cf * capacity_mw
+full_pred_perc = model.predict(X)            # X == all data, RENAMED full_pred_cf
 
 pd.DataFrame({
     "datetime": df["datetime"],
-    "wind_mw_pred": full_pred_mw
+    "wind_perc_pred": full_pred_perc # <-- RENAMED column wind_mw_pred
 }).to_parquet(
-    PRED_DIR / "catboost_full.parquet",     # <- NEW file
+    MODELS_DIR / "catboost_full.parquet",
     index=False
 )
 
@@ -241,35 +243,45 @@ pd.DataFrame({
 # ──────────────────────────
 # Evaluation & artefacts
 # ──────────────────────────
-pred_hold_cf = model.predict(X_holdout)
-pred_hold_mw = pred_hold_cf * capacity_mw
-actual_hold_mw = y_holdout * capacity_mw
+pred_hold_perc = model.predict(X_holdout) # <-- RENAMED pred_hold_cf
+actual_hold_perc = y_holdout # <-- RENAMED actual_hold_mw to actual_hold_perc
 
-mse_final  = mean_squared_error(actual_hold_mw, pred_hold_mw)
+mse_final  = mean_squared_error(actual_hold_perc, pred_hold_perc)
 rmse_final = mse_final ** 0.5
-mape_final = mean_absolute_percentage_error(actual_hold_mw, pred_hold_mw)
-logging.info(f"Hold‑out RMSE = {rmse_final:.2f} MW | MAPE = {mape_final:.4f}")
+mape_final = mean_absolute_percentage_error(actual_hold_perc, pred_hold_perc)
 
+# Metrics dict update
 metrics = {
-    "holdout_rmse_mw": rmse_final,
-    "holdout_mape": mape_final,
-    "capacity_mw_approx": capacity_mw,
-    "optuna_best_cv_rmse": best_value,
-    "optuna_n_trials": N_TRIALS,
-    "optuna_best_params_raw": best_params_optuna,
-    "final_model_params": final_params,
+    "optuna_best_cv_rmse": study.best_value, # Note: Optuna RMSE is on the target scale (now percentage)
+    "holdout_rmse_perc": rmse_final,
+    "holdout_mape_perc": mape_final,
+    # "capacity_mw_approx": capacity_mw, # <-- REMOVED capacity
+    "best_params": best_params_optuna,
 }
-METRICS_PATH.write_text(json.dumps(metrics, indent=4))
 
-model.save_model(str(MODEL_PATH))
+# Updated logging messages
+logging.info(f"Holdout RMSE (perc): {rmse_final:.4f}")
+logging.info(f"Holdout MAPE (perc): {mape_final:.4f}")
 
-pred_df = pd.DataFrame(
-    {
-        "datetime": df["datetime"].iloc[-holdout_size:],
-        "wind_mw_actual": actual_hold_mw,
-        "wind_mw_pred": pred_hold_mw,
-    }
+# Save metrics
+with open(METRICS_PATH, "w") as f:
+    json.dump(metrics, f, indent=4)
+logging.info(f"Saved metrics → {METRICS_PATH}")
+
+# Save holdout predictions
+holdout_df = pd.DataFrame({
+    "datetime": df["datetime"].iloc[-holdout_size:],
+    "wind_perc_actual": actual_hold_perc, # <-- RENAMED column wind_mw_actual
+    "wind_perc_pred": pred_hold_perc,   # <-- RENAMED column wind_mw_pred
+})
+holdout_df.to_parquet(
+    MODELS_DIR / "catboost_holdout_gpu_final.parquet", index=False
 )
-pred_df.to_parquet(PRED_DIR / "catboost_holdout_gpu_final.parquet", index=False)
+logging.info(f"Saved holdout predictions → {MODELS_DIR / 'catboost_holdout_gpu_final.parquet'}")
 
-logging.info("✓ Enhanced GPU training complete – model, metrics & predictions saved.")
+# Save model
+model.save_model(str(MODEL_PATH))
+logging.info(f"Saved final model → {MODEL_PATH}")
+
+# Updated final log message
+logging.info("GPU training script finished - model, metrics & predictions saved.")

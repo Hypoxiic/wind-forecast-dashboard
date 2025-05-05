@@ -2,52 +2,65 @@
 
 Live demo → [https://wind‑forecast-dashboard.onrender.com](https://wind‑forecast-dashboard.onrender.com)  (Free Render service – cold‑start ≤ 30 s)
 
-*A concise, fully‑reproducible mini‑project that forecasts **day‑ahead Great‑Britain wind generation** and serves the results through an interactive Dash app.*
+*A concise, fully‑reproducible mini‑project that forecasts the **day‑ahead percentage of Great‑Britain wind generation in the national mix** and serves the results through an interactive Dash app.*
+
+> **Note:** This project now uses the [Carbon Intensity API](https://carbonintensity.org.uk/) for wind generation data, which provides the **percentage** contribution of wind to the GB generation mix (0‑100%), not absolute Megawatts (MW).
 
 ---
 
 ## 1  Business context
 
-Short‑horizon wind output drives GB's supply‑demand balance, flexible‑asset dispatch and baseload prices. Accurate 24 h forecasts ⇒ lower imbalance costs and better market bids.
+Short‑horizon wind output (as a percentage of the mix) drives GB's supply‑demand balance, flexible‑asset dispatch and baseload prices. Accurate 24 h forecasts ⇒ lower imbalance costs and better market bids.
 
 ---
 
 ## 2  Automated data & modelling pipeline
 
 ```text
-(Carbon‑Intensity API  +  Open‑Meteo archive) ─▶  src/etl.py            ─▶  data/raw/
+# Training Setup (Run manually or via specific workflow)
+(Carbon‑Intensity API  +  Open‑Meteo archive) ─▶  src/etl_training.py   ─▶  data/raw/
                                                  (ci_wind.parquet + openmeteo.parquet)
                                                             │
                                                             ▼
-                                            src/featurise.py  ─▶  data/features/features.parquet
-                                                            │  (+ lags, seasonality, v³ proxy)
+                                            src/featurise.py      ─▶  data/features/features.parquet
+                                                            │      (+ lags, seasonality, v³ proxy)
                                                             ▼
-                                            src/train_model.py ─▶  models/catboost_best.cbm   ─┐
-                                                                                               │
-                                                                                               ▼
-                                            src/predict.py     ─▶  data/predictions/latest.parquet  ← nightly
+                                            src/train_model.py    ─▶  models/catboost_best.cbm
+                                            src/validate.py       ─▶  cv_metrics.json
 
-Dash app reads `latest.parquet` every 10 min (auto‑refresh) so the chart is always current.
+# Nightly Prediction Pipeline (Automated via GitHub Actions)
+(Carbon‑Intensity API  +  Open‑Meteo archive) ─▶  src/etl_inference.py  ─▶  data/raw/
+                                                            │
+                                                            ▼
+                                            src/featurise.py      ─▶  data/features/features.parquet
+                                                            │
+                                                            ▼
+                                            src/pipeline.py orchestrates:
+                                              └─ src/predict.py    ─▶  data/predictions/latest.parquet  ← nightly
+                                                 (using models/catboost_best.cbm)
+
+Dash app reads `latest.parquet` every 10 min (auto‑refresh) so the chart (showing predicted wind percentage) is always current.
 ```
 
 ### Nightly refresh
 
 A GitHub Actions workflow runs at **01 : 30 UTC** every night:
 
-1. Re‑download yesterday's wind out‑turn from the **Carbon‑Intensity API**.
-2. Fetch the newest weather features from **Open‑Meteo** (month cache keeps the run fast).
-3. Re‑build features and re‑inference the CatBoost model.
-4. Commit & push `data/predictions/latest.parquet` → Render redeploys the Dash app automatically.
+1. Re‑download yesterday's wind **percentage** out‑turn from the **Carbon‑Intensity API** using `etl_inference.py`.
+2. Fetch the newest weather features from **Open‑Meteo**.
+3. Re‑build features using `featurise.py`.
+4. Run the prediction pipeline (`pipeline.py`) which calls `predict.py` to re‑inference the CatBoost model.
+5. Commit & push `data/predictions/latest.parquet` (containing `wind_perc_pred`) → Render redeploys the Dash app automatically.
 
 ---
 
 ## 3  Why the model works
 
-| Factor                                                  | Contribution                                          |
-| ------------------------------------------------------- | ----------------------------------------------------- |
-| **10 m wind‑speed forecast (D‑1)**                      | Turbine power curve → explains ≈ 90 % of MW variance. |
-| **Yesterday's observed output**                         | Autocorrelation + curtailment inertia.                |
-| Engineered extras (v³ proxy, seasonality, holiday flag) | Mop‑up residual bias.                                 |
+| Factor                                                  | Contribution                                                  |
+| ------------------------------------------------------- | ------------------------------------------------------------- |
+| **10 m wind‑speed forecast (D‑1)**                      | Turbine power curve → explains ≈ 90 % of wind output variance. |
+| **Yesterday's observed output (%age)**                  | Autocorrelation + system inertia (percentage reflects mix).   |
+| Engineered extras (v³ proxy, seasonality, holiday flag) | Mop‑up residual bias.                                         |
 
 Walk‑forward CV + early‑stopping keep the CatBoost model honest.
 
@@ -59,13 +72,32 @@ Walk‑forward CV + early‑stopping keep the CatBoost model honest.
 # Install deps (CUDA optional but speeds training)
 pip install -r requirements.txt
 
-# Run the whole pipeline once
-python src/etl.py && \
-python src/featurise.py && \
-python src/train_model.py && \
-python src/predict.py
+# --- Training Pipeline (Run once or when retraining) ---
+# 1. Fetch full history and weather data for training
+python src/etl_training.py
 
-# Launch dashboard locally
+# 2. Build features
+python src/featurise.py
+
+# 3. Train and validate the model (saves model and CV metrics)
+python src/train_model.py
+python src/validate.py
+
+# --- Prediction Pipeline (Simulates nightly run) ---
+# 1. Fetch latest data needed for inference
+python src/etl_inference.py
+
+# 2. Rebuild features (might be redundant if etl_inference output is same format)
+#    (Ensure featurise.py uses the data generated by etl_inference.py)
+python src/featurise.py
+
+# 3. Generate latest predictions
+python src/predict.py
+# OR run the combined inference pipeline:
+# python src/pipeline.py
+
+# --- Launch Dashboard --- 
+# Reads data/predictions/latest.parquet which now contains wind_perc_pred
 python dashboard/app.py         # http://127.0.0.1:8050
 ```
 
@@ -76,7 +108,7 @@ python dashboard/app.py         # http://127.0.0.1:8050
 3. Build command = `pip install -r requirements.txt` (auto)
    Start command = `gunicorn dashboard.app:server --bind 0.0.0.0:$PORT`
 4. Free plan → Create. In ~2 min you get the public URL.
-5. The nightly GitHub Action pushes a new predictions file each night – Render auto‑redeploys.
+5. The nightly GitHub Action (ensure it runs `src/pipeline.py` or the equivalent steps `etl_inference`, `featurise`, `predict`) pushes a new predictions file (`wind_perc_pred`) each night – Render auto‑redeploys.
 
 ---
 
@@ -87,19 +119,28 @@ wind‑forecast‑dashboard/
 ├─ assets/                       # custom CSS/JS (fonts, debug close btn)
 ├─ data/   (git‑ignored)
 │   ├─ raw/
-│   │   ├─ wind/ci_wind.parquet          # Carbon‑Intensity wind out‑turn (cached)
-│   │   └─ meteo/openmeteo_YYYY‑MM.parquet  # monthly weather cache
+│   │   ├─ ci_wind.parquet             # Carbon‑Intensity wind percentage (cached)
+│   │   └─ openmeteo_YYYY‑MM.parquet # monthly weather cache
 │   ├─ features/features.parquet
-│   └─ predictions/latest.parquet       # refreshes nightly
+│   └─ predictions/
+│       └─ latest.parquet            # Predicted wind percentage (refreshes nightly)
 ├─ dashboard/app.py              # Plotly‑Dash application
 ├─ src/
-│   ├─ etl.py                    # data ingestion (CI + Open‑Meteo)
-│   ├─ featurise.py              # feature engineering
-│   ├─ train_model.py            # GPU CatBoost training + Optuna tuning
-│   ├─ predict.py                # nightly inference
-│   └─ pipeline.py               # one‑shot driver (called by GitHub Action)
-├─ models/                       # saved CatBoost model(s)
-├─ .github/workflows/nightly.yml # nightly CI/CD pipeline
+│   ├─ etl_training.py         # Data ingestion for model training
+│   ├─ etl_inference.py        # Data ingestion for prediction pipeline
+│   ├─ featurise.py              # Feature engineering
+│   ├─ train_model.py            # GPU CatBoost training + Optuna tuning (predicts perc)
+│   ├─ validate.py               # Cross-validation script (evaluates perc)
+│   ├─ predict.py                # Nightly inference (outputs perc)
+│   └─ pipeline.py               # Orchestrates nightly inference pipeline
+├─ models/                       # Saved model, study, and related predictions
+│   ├─ model.cbm                 # Saved CatBoost model
+│   ├─ optuna_study_gpu.pkl      # Optuna study object
+│   ├─ catboost_full.parquet     # Full history predictions (perc)
+│   └─ catboost_holdout_gpu_final.parquet # Holdout actual/pred (perc)
+├─ .github/workflows/nightly.yml # Nightly CI/CD pipeline (verify steps)
+├─ metrics.json                  # Metrics from last train run (RMSE/MAPE on perc)
+├─ cv_metrics.json               # Cross-validation metrics (RMSE/MAPE on perc)
 ├─ requirements.txt
 └─ README.md
 ```
@@ -108,10 +149,10 @@ wind‑forecast‑dashboard/
 
 ## 6  Road‑map
 
-* [x] GPU CatBoost + walk‑forward CV
-* [x] Full‑history predictions for dashboard
+* [x] GPU CatBoost + walk‑forward CV (predicting percentage)
+* [x] Full‑history predictions for dashboard (percentage)
 * [x] Render free‑tier deployment
-* [x] **Nightly GitHub Action to refresh predictions**
+* [x] **Nightly GitHub Action to refresh percentage predictions**
 * [ ] Pre‑commit lint/format hooks (ruff, black, isort)
 * [ ] Cloudfront (or Fly io) in front of Render for faster cold‑start
 
