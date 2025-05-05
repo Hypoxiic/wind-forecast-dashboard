@@ -2,6 +2,7 @@
 from pathlib import Path
 import pandas as pd
 from catboost import CatBoostRegressor
+from catboost import Pool
 
 FEAT   = Path("data/features/features.parquet")
 MODEL  = Path("models/model.cbm")
@@ -11,7 +12,12 @@ def main():
     feats = pd.read_parquet(FEAT)
     model = CatBoostRegressor().load_model(str(MODEL))
     preds = feats[["datetime"]].copy()
-    preds["wind_perc_pred"] = model.predict(feats.drop(columns=["datetime", "wind_mw", "wind_perc"], errors='ignore'))
+    
+    # Prepare features for prediction
+    X = feats.drop(columns=["datetime", "wind_mw", "wind_perc"], errors='ignore')
+    pool = Pool(X, cat_features=[]) # Explicitly define no categorical features
+
+    preds["wind_perc_pred"] = model.predict(pool)
     preds.to_parquet(OUTDIR / "latest.parquet", index=False)
 
 if __name__ == "__main__":
