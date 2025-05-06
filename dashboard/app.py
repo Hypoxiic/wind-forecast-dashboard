@@ -25,11 +25,39 @@ import dash_bootstrap_components as dbc
 from dash_bootstrap_templates import ThemeSwitchAIO, load_figure_template
 from sklearn.metrics import mean_absolute_percentage_error, mean_squared_error
 
+# --- Setup dedicated file logger for dashboard debugging ---
+# Get the root logger
+# logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s") # This might conflict if set globally elsewhere, or can be primary
+
+# Create a specific logger for this dashboard module
+dash_logger = logging.getLogger("dashboard_app")
+dash_logger.setLevel(logging.INFO)
+# Create a file handler
+log_file_path = Path(__file__).parent / "dashboard_debug.log"
+try:
+    # Attempt to remove old log file to start fresh each run, if desired
+    if log_file_path.exists():
+        os.remove(log_file_path)
+except OSError as e:
+    print(f"Warning: Could not remove old log file {log_file_path}: {e}")
+
+file_handler = logging.FileHandler(log_file_path)
+file_handler.setLevel(logging.INFO)
+# Create a logging format
+formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+file_handler.setFormatter(formatter)
+# Add the handlers to the logger
+if not dash_logger.handlers: # Avoid adding multiple handlers on hot reloads
+    dash_logger.addHandler(file_handler)
+dash_logger.info("Dashboard logger initialized. Logging to: dashboard_debug.log")
+# --- End of logger setup ---
+
 # ─── Paths & Constants ───────────────────────────────────────────────────────
 ROOT             = Path(__file__).resolve().parents[1]
 FEATURES_PATH    = ROOT / "data" / "features" / "features.parquet"
 HISTORY_PATH     = ROOT / "data" / "features" / "history.parquet"
 LATEST_PRED_PATH = ROOT / "data" / "predictions" / "latest.parquet"
+FULL_HIST_PREDS_PATH = ROOT / "models" / "catboost_full.parquet"
 METRICS_PATH     = ROOT / "metrics.json"
 
 COLOR_MAP = {
@@ -64,56 +92,87 @@ raw_metrics = safe_json(METRICS_PATH)
 cat_rmse    = raw_metrics.get("holdout_rmse_perc", np.nan)
 cat_mape    = raw_metrics.get("holdout_mape_perc", np.nan)
 
-# ─── Load & Compute Baseline ─────────────────────────────────────────────────
-# Read rolling-history of features
+# ─── Load & Compute Baseline & Prepare Plot Data ───────────────────────────
+# Read rolling-history of features (actuals and baseline lags)
 hist_df = load_parquet(HISTORY_PATH, ["datetime", "wind_perc", "wind_perc_lag_48h"])
-# If first run and history missing, fall back to original snapshot
+# If first run and history missing, fall back to original snapshot from features.parquet (less likely now)
 if hist_df.empty and FEATURES_PATH.exists():
+    logging.warning("history.parquet is empty, attempting to fallback to features.parquet for hist_df")
     hist_df = load_parquet(FEATURES_PATH, ["datetime", "wind_perc", "wind_perc_lag_48h"])
 
-# Calculate Baseline RMSE and MAPE based on the last 24h of available actuals in hist_df
-actuals_df = hist_df.dropna(subset=["wind_perc"])
-if not actuals_df.empty:
-    latest_actual_date = actuals_df.datetime.max()
-    # Ensure cutoff doesn't go before the start of hist_df if hist_df is very short
-    cutoff_start = actuals_df.datetime.min()
-    cutoff_end = latest_actual_date
+# Load predictions
+latest_preds_df = load_parquet(LATEST_PRED_PATH, ["datetime", "wind_perc_pred"])
+full_hist_preds_df = load_parquet(FULL_HIST_PREDS_PATH, ["datetime", "wind_perc_pred"])
+
+# Consolidate predictions
+if not full_hist_preds_df.empty:
+    all_preds_df = full_hist_preds_df.copy()
+    if not latest_preds_df.empty:
+        # Ensure latest_preds_df takes precedence by removing its datetime range from all_preds_df first
+        all_preds_df = pd.concat([
+            all_preds_df[~all_preds_df['datetime'].isin(latest_preds_df['datetime'])],
+            latest_preds_df
+        ]).sort_values("datetime").reset_index(drop=True)
+elif not latest_preds_df.empty:
+    all_preds_df = latest_preds_df.copy()
+else:
+    all_preds_df = pd.DataFrame(columns=["datetime", "wind_perc_pred"])
+    all_preds_df['datetime'] = pd.to_datetime(all_preds_df['datetime'])
+
+# Merge with hist_df (actuals and baseline)
+if not hist_df.empty:
+    plot_data = pd.merge(
+        hist_df,
+        all_preds_df,
+        on="datetime",
+        how="outer",
+        sort=True,
+    )
+else: # Fallback if hist_df is critically empty
+    logging.warning("history.parquet was empty, plot_data will be based on predictions only.")
+    plot_data = all_preds_df.copy()
+    # Ensure essential columns for plotting/metrics if hist_df was missing
+    if "wind_perc" not in plot_data: plot_data["wind_perc"] = np.nan
+    if "wind_perc_lag_48h" not in plot_data: plot_data["wind_perc_lag_48h"] = np.nan
+
+# Final checks for essential columns in plot_data
+if "datetime" not in plot_data:
+    plot_data["datetime"] = pd.to_datetime([]) # Create empty datetime series if totally missing
+if "wind_perc_pred" not in plot_data:
+    plot_data["wind_perc_pred"] = np.nan
+if "wind_perc" not in plot_data:
+    plot_data["wind_perc"] = np.nan
+if "wind_perc_lag_48h" not in plot_data:
+    plot_data["wind_perc_lag_48h"] = np.nan
+
+# Calculate Baseline RMSE and MAPE (using the now comprehensive plot_data for actuals source)
+# but hist_df is still the more reliable source for this specific calculation if available
+# Let's use the existing baseline logic that depends on hist_df for stability
+# (The baseline calculation was already refined to use actuals_df from hist_df)
+actuals_for_baseline_calc = hist_df.dropna(subset=["wind_perc"])
+if not actuals_for_baseline_calc.empty:
+    latest_actual_date = actuals_for_baseline_calc.datetime.max()
     cutoff_calc_start = latest_actual_date - pd.Timedelta(days=1)
-    
-    # Define the period for baseline calculation (last 24h of actuals)
     sub = hist_df[
         (hist_df.datetime >= cutoff_calc_start) & 
-        (hist_df.datetime <= cutoff_end)
+        (hist_df.datetime <= latest_actual_date)
     ].dropna(subset=["wind_perc", "wind_perc_lag_48h"])
-    
-    if not sub.empty and len(sub) > 1: # Need at least 2 points for error metrics
+    if not sub.empty and len(sub) > 1:
         mse_val        = mean_squared_error(sub.wind_perc, sub.wind_perc_lag_48h)
         baseline_rmse  = np.sqrt(mse_val)
         baseline_mape  = mean_absolute_percentage_error(sub.wind_perc, sub.wind_perc_lag_48h)
     else:
-        logging.warning("Not enough data points to calculate baseline metrics after filtering.")
         baseline_rmse = baseline_mape = np.nan
 else:
-    logging.warning("No actual data (wind_perc) found in history_df to calculate baseline metrics.")
     baseline_rmse = baseline_mape = np.nan
 
-# ─── Load Latest Predictions ─────────────────────────────────────────────────
-preds_df = load_parquet(LATEST_PRED_PATH, ["datetime", "wind_perc_pred"])
-
-# ─── Merge History + Tomorrow's Forecast ────────────────────────────────────
-plot_data = pd.merge(
-    hist_df,
-    preds_df,
-    on="datetime",
-    how="outer",
-    sort=True,
-)
-if "wind_perc_pred" not in plot_data:
-    plot_data["wind_perc_pred"] = np.nan
-
-# Recalculate slider bounds
-min_d = plot_data.datetime.dt.date.min()
-max_d = plot_data.datetime.dt.date.max()
+# Recalculate slider bounds from the final plot_data
+if not plot_data.empty and not plot_data['datetime'].dropna().empty:
+    min_d = plot_data['datetime'].dropna().dt.date.min()
+    max_d = plot_data['datetime'].dropna().dt.date.max()
+else:
+    min_d = date.today() - pd.Timedelta(days=30)
+    max_d = date.today() + pd.Timedelta(days=2)
 
 # ─── KPI Card Helpers ────────────────────────────────────────────────────────
 def delta_colour(val, base, lower_better=True):
@@ -231,10 +290,11 @@ app.layout = dbc.Container([
     [Input(ThemeSwitchAIO.ids.switch("theme"),"value"),
      Input("tabs","active_tab"),
      Input("series","value"), 
-     Input("date-picker-global", "start_date"), # Use the global date picker ID
-     Input("date-picker-global", "end_date")]   # Use the global date picker ID
+     Input("date-picker-global", "start_date"),
+     Input("date-picker-global", "end_date")]
 )
 def render_content(is_dark, active_tab, series_sel, start_d_global, end_d_global):
+    dash_logger.info(f"--- render_content CALLED: active_tab={active_tab}, series_sel={series_sel}, start_d={start_d_global}, end_d={end_d_global} ---")
     template = THEME_DARK if is_dark else THEME_LIGHT
     light_bg = not is_dark
     kpi_cards_content = []
@@ -265,6 +325,7 @@ def render_content(is_dark, active_tab, series_sel, start_d_global, end_d_global
         # We might hide/show the global date_picker or adjust its range for this tab later if needed.
 
         if df_forecast_tab.empty or not series_sel:
+            dash_logger.info("Forecast tab: No data for forecast window or no series selected.")
             fig_forecast_content = html.Div("No data available for the forecast window.")
         else:
             fig_fc = px.line(
@@ -274,22 +335,55 @@ def render_content(is_dark, active_tab, series_sel, start_d_global, end_d_global
             )
             fig_fc.update_layout(margin={"t":30,"b":30,"l":30,"r":30}, title_text="Forecast & Recent Data (Last 3 Days History + 2 Days Forecast)", title_x=0.5)
             if light_bg: fig_fc.update_layout(paper_bgcolor="white", plot_bgcolor="white")
+            dash_logger.info(f"Forecast tab: Plotting {len(df_forecast_tab)} rows.")
             fig_forecast_content = dcc.Graph(figure=fig_fc)
         
         tab_specific_content = [fig_forecast_content] # Just the graph for this tab now
 
     elif active_tab == "historical":
-        # --- KPI Cards for Historical Analysis Tab (Placeholders) ---
-        kpi_cards_content = [dbc.Row([
-            dbc.Col(dbc.Alert("KPIs for selected historical range (dynamic) - Coming soon!", color="info"))
-        ], className="g-4 mb-4")]
-        
-        # --- Content for Historical Analysis Tab ---
-        # Controls are global. The global date_picker (date-picker-global) drives this tab.
+        # Filter data for the selected range
         df_hist_tab = plot_data[
             (plot_data.datetime.dt.date >= pd.to_datetime(start_d_global).date()) &
             (plot_data.datetime.dt.date <= pd.to_datetime(end_d_global).date())
         ]
+
+        # --- Calculate Dynamic KPIs for Historical Analysis Tab ---
+        dyn_cat_rmse, dyn_cat_mape = np.nan, np.nan
+        dyn_baseline_rmse, dyn_baseline_mape = np.nan, np.nan
+
+        # CatBoost model dynamic metrics
+        df_eval_model = df_hist_tab.dropna(subset=["wind_perc", "wind_perc_pred"])
+        if len(df_eval_model) > 1:
+            dyn_cat_rmse = np.sqrt(mean_squared_error(df_eval_model.wind_perc, df_eval_model.wind_perc_pred))
+            dyn_cat_mape = mean_absolute_percentage_error(df_eval_model.wind_perc, df_eval_model.wind_perc_pred)
+
+        # Baseline dynamic metrics
+        df_eval_baseline = df_hist_tab.dropna(subset=["wind_perc", "wind_perc_lag_48h"])
+        if len(df_eval_baseline) > 1:
+            dyn_baseline_rmse = np.sqrt(mean_squared_error(df_eval_baseline.wind_perc, df_eval_baseline.wind_perc_lag_48h))
+            dyn_baseline_mape = mean_absolute_percentage_error(df_eval_baseline.wind_perc, df_eval_baseline.wind_perc_lag_48h)
+        
+        # --- KPI Cards for Historical Analysis Tab (Dynamic) ---
+        dyn_cat_rmse_col, dyn_cat_rmse_ic = delta_colour(dyn_cat_rmse, dyn_baseline_rmse)
+        dyn_cat_mape_col, dyn_cat_mape_ic = delta_colour(dyn_cat_mape, dyn_baseline_mape)
+
+        card_dyn_baseline_rmse = make_card("Baseline RMSE (Selected Range)", f"{dyn_baseline_rmse:.2f}" if not np.isnan(dyn_baseline_rmse) else "N/A", "%", "light")
+        card_dyn_baseline_mape = make_card("Baseline MAPE (Selected Range)", f"{dyn_baseline_mape*100:.1f}" if not np.isnan(dyn_baseline_mape) else "N/A", "%", "light")
+        card_dyn_cat_rmse = make_card("Model RMSE (Selected Range)", f"{dyn_cat_rmse:.2f}" if not np.isnan(dyn_cat_rmse) else "N/A", f"% {dyn_cat_rmse_ic}", dyn_cat_rmse_col, tooltip=f"Model vs Baseline Δ {(dyn_cat_rmse-dyn_baseline_rmse)/dyn_baseline_rmse:+.0%}" if not (np.isnan(dyn_cat_rmse) or np.isnan(dyn_baseline_rmse)) else "N/A")
+        card_dyn_cat_mape = make_card("Model MAPE (Selected Range)", f"{dyn_cat_mape*100:.1f}" if not np.isnan(dyn_cat_mape) else "N/A", f"% {dyn_cat_mape_ic}", dyn_cat_mape_col, tooltip=f"Model vs Baseline Δ {(dyn_cat_mape-dyn_baseline_mape)/dyn_baseline_mape:+.1%}" if not (np.isnan(dyn_cat_mape) or np.isnan(dyn_baseline_mape)) else "N/A")
+        kpi_cards_content = [dbc.Row([card_dyn_baseline_rmse, card_dyn_baseline_mape, card_dyn_cat_rmse, card_dyn_cat_mape], className="g-4 mb-4")]
+        
+        # --- Content for Historical Analysis Tab (Plot) ---
+        # (Keep diagnostic logging as is for now, can be removed later)
+        if not df_hist_tab.empty:
+            dash_logger.info(f"Historical tab: df_hist_tab from {start_d_global} to {end_d_global} (example slice):\n" \
+                         f"{df_hist_tab[(df_hist_tab.datetime >= pd.Timestamp('2019-01-01', tz='UTC')) & (df_hist_tab.datetime <= pd.Timestamp('2019-01-03', tz='UTC'))][['datetime', 'wind_perc', 'wind_perc_pred']].to_string()}")
+            if series_sel:
+                 dash_logger.info(f"NaN counts in selected df_hist_tab for series {series_sel}:\n{df_hist_tab[series_sel if isinstance(series_sel, list) else [series_sel]].isnull().sum().to_string()}")
+            else:
+                dash_logger.info("Historical tab: No series selected.")
+        else:
+            dash_logger.info("Historical tab: df_hist_tab is empty for the selected range.")
 
         if df_hist_tab.empty or not series_sel:
             fig_historical_content = html.Div("No data available for that selection.")

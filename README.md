@@ -41,10 +41,10 @@ Short‑horizon wind output (as a percentage of the mix) drives GB's supply‑de
 
 
 # Dashboard
-Reads data/features/history.parquet and data/predictions/latest.parquet.
+Reads historical actuals, baseline data, full historical predictions, and latest forecasts.
 Displays data via dashboard/app.py in two tabs:
-  - Forecast & Recent: Shows recent history + upcoming 48h forecast.
-  - Historical Analysis: Allows exploring the full historical data and predictions.
+  - Forecast & Recent: Shows recent history + upcoming 48h forecast with static model performance KPIs.
+  - Historical Analysis: Allows exploring the full historical data and predictions, with dynamically calculated performance KPIs (RMSE/MAPE for model and baseline) for the selected date range.
 ```
 
 ### Nightly refresh
@@ -160,7 +160,8 @@ wind‑forecast‑dashboard/
 * [x] Render free‑tier deployment
 * [x] Nightly GitHub Action to refresh percentage predictions & history
 * [x] Two-tab dashboard structure (Forecast/Recent, Historical)
-* [ ] Implement dynamic KPIs and error plot for Historical Analysis tab
+* [x] Implement dynamic KPIs for Historical Analysis tab
+* [ ] Implement error plot for Historical Analysis tab
 * [ ] Pre‑commit lint/format hooks (ruff, black, isort)
 * [ ] Cloudfront (or Fly io) in front of Render for faster cold‑start
 
