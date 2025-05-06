@@ -8,6 +8,9 @@ on:
 jobs:
   build-run:
     runs-on: ubuntu-latest
+    # Add permissions block to grant write access for GITHUB_TOKEN
+    permissions:
+      contents: write
 
     steps:
       - uses: actions/checkout@v4
@@ -30,13 +33,14 @@ jobs:
           python -m src.pipeline
 
       - name: Commit & push updated data
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # env:
+          # GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} # Not needed if using default GITHUB_TOKEN with above permissions
         run: |
           git config user.name  "Wind-Bot"
           git config user.email "actions@github.com"
           git add data/predictions/latest.parquet
           git add data/features/history.parquet
+          
           if git diff --staged --quiet; then
             echo "No changes to commit."
           else
