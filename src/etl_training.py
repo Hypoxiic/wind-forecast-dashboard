@@ -1,232 +1,124 @@
+#! /usr/bin/env python
 # src/etl_training.py
-"""
-ETL script for fetching historical data for model training:
-* Historical wind generation percentage (Carbon Intensity API)
-* Historical weather data             (Open‑Meteo Archive API)
 
-Saves data to data/raw/ directory in Parquet format.
-
-NOTE: Carbon Intensity API provides wind generation as a percentage ('perc')
-      of the total mix, not absolute MW. Downstream scripts (featurise, train)
-      expecting 'wind_mw' will need modification.
-"""
 from __future__ import annotations
-
 import logging
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from pathlib import Path
 
 import pandas as pd
 import requests
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-# ---------------- User‑configurable ---------------------------------------- #
-# Define the historical period for training data
-# Inclusive start date, exclusive end date (like Python slicing)
-TRAIN_START_DATE = date(2019, 1, 1) # Example: Start of 2019
-TRAIN_END_DATE   = date(2023, 12, 31) # Example: End of 2023
+# ── USER CONFIG ─────────────────────────────────────────────────────────────
+TRAIN_START_DATE = date(2017, 9, 27)
+TRAIN_END_DATE   = date(2025, 5, 5)
 
-# Location for weather data
-LAT, LON = 54.0, -1.5  # Example coordinates (Central UK)
-HOURLY_VARS = "temperature_2m,wind_speed_10m" # Weather variables
+# For Carbon-Intensity wind percent
+CI_API_BASE_URL   = "https://api.carbonintensity.org.uk"
+CI_HEADERS        = {"Accept": "application/json"}
+CI_CHUNK_DAYS     = 30
 
-# Data directories
-DATA_DIR = Path("data") # Ensure this path is correct relative to execution
-RAW_DIR = DATA_DIR / "raw"
-RAW_DIR.mkdir(parents=True, exist_ok=True)
+# For Open-Meteo archive
+OM_ARCHIVE_URL    = "https://archive-api.open-meteo.com/v1/archive"
+OM_CHUNK_YEARS    = 1
+LAT, LON          = 54.0, -1.5
+HOURLY_VARS       = "temperature_2m,wind_speed_10m"
 
-# Output file names expected by featurise.py
-WIND_OUT_PATH = RAW_DIR / "eso_wind.parquet"
-METEO_OUT_PATH = RAW_DIR / "openmeteo_weather.parquet"
+# ── PATHS ────────────────────────────────────────────────────────────────────
+DATA_DIR      = Path("data")
+TRAIN_RAW_DIR = DATA_DIR / "raw" / "training"
+TRAIN_RAW_DIR.mkdir(parents=True, exist_ok=True)
 
-# Fetching configuration
-CI_FETCH_CHUNK_DAYS = 30 # Fetch Carbon Intensity data in chunks (e.g., 30 days)
-OM_FETCH_CHUNK_YEARS = 1 # Fetch Open Meteo data in chunks (e.g., 1 year)
-# --------------------------------------------------------------------------- #
+WIND_OUT_PATH = TRAIN_RAW_DIR / "ci_wind_perc_training.parquet"
+METEO_OUT_PATH= TRAIN_RAW_DIR / "openmeteo_weather_training.parquet"
 
-# ---------- Setup Logging -------------------------------------------------- #
+# ── LOGGING SETUP ────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-# ---------- Carbon‑Intensity API Configuration ----------------------------- #
-CI_API_BASE_URL = "https://api.carbonintensity.org.uk"
-CI_HEADERS = {'Accept': 'application/json'}
-
-# ---------- Open‑Meteo API Configuration ----------------------------------- #
-OM_ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
-
-# ---------- Retry Mechanism ------------------------------------------------ #
-@retry(stop=stop_after_attempt(5), wait=wait_exponential(min=5, max=60))
+# ── RETRY UTILITY ────────────────────────────────────────────────────────────
+@retry(stop=stop_after_attempt(5), wait=wait_exponential(min=2, max=30))
 def _make_request(url: str, params: dict | None = None, headers: dict | None = None) -> dict:
-    """Makes a GET request with retries and basic error checking."""
-    try:
-        logging.debug(f"Requesting URL: {url} with params: {params}")
-        response = requests.get(url, params=params, headers=headers, timeout=120) # Longer timeout for potentially large data
-        response.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
-        return response.json()
-    except requests.exceptions.RequestException as e:
-        logging.error(f"Request failed for {url}: {e}. Retrying...")
-        raise # Re-raise exception to trigger tenacity retry
+    resp = requests.get(url, params=params, headers=headers, timeout=60)
+    resp.raise_for_status()
+    return resp.json()
 
-# ---------- Carbon‑Intensity Historical Wind Percentage Fetcher ------------- #
+# ── FETCH CARBON-INTENSITY WIND PERCENT ──────────────────────────────────────
 def fetch_ci_wind_perc_historical(start_date: date, end_date: date) -> pd.DataFrame:
-    """
-    Fetches historical wind generation percentage from Carbon Intensity API
-    in chunks.
-    """
     all_rows = []
-    current_start = start_date
-
-    logging.info(f"Fetching Carbon Intensity wind % from {start_date} to {end_date}")
-
-    while current_start <= end_date:
-        chunk_end = min(current_start + timedelta(days=CI_FETCH_CHUNK_DAYS - 1), end_date)
-        from_dt_str = current_start.strftime('%Y-%m-%dT00:00Z')
-        # Fetch up to the end of the chunk_end day
-        to_dt_str = chunk_end.strftime('%Y-%m-%dT23:30Z')
-
-        url = f"{CI_API_BASE_URL}/generation/{from_dt_str}/{to_dt_str}"
-        logging.info(f"  Fetching chunk: {current_start} to {chunk_end}")
-
+    cur = start_date
+    logging.info(f"Fetching CI wind % from {start_date} to {end_date}")
+    while cur <= end_date:
+        chunk_end = min(cur + timedelta(days=CI_CHUNK_DAYS - 1), end_date)
+        url = f"{CI_API_BASE_URL}/generation/{cur.strftime('%Y-%m-%dT00:00Z')}/" \
+              f"{chunk_end.strftime('%Y-%m-%dT23:30Z')}"
+        logging.info(f"  CI chunk: {cur} → {chunk_end}")
         try:
             js = _make_request(url, headers=CI_HEADERS)
-            time.sleep(1) # Be polite to the API
-
-            if "data" not in js or not isinstance(js["data"], list):
-                logging.warning(f"  Unexpected response structure for chunk {current_start}-{chunk_end}. Skipping.")
-                current_start += timedelta(days=CI_FETCH_CHUNK_DAYS)
-                continue
-
-            chunk_rows = []
-            for interval_data in js["data"]:
-                ts = interval_data.get("from")
-                generation_mix = interval_data.get("generationmix")
-
-                if not ts or not generation_mix:
-                    continue # Skip malformed intervals
-
-                wind_entry = next((item for item in generation_mix if item.get("fuel") == "wind"), None)
-
-                if wind_entry and "perc" in wind_entry:
-                    chunk_rows.append({"datetime": ts, "wind_perc": wind_entry["perc"]})
-                else:
-                    # Log if wind data is missing for an interval, append NaN
-                    logging.debug(f"  Wind percentage not found for interval {ts}. Appending NaN.")
-                    chunk_rows.append({"datetime": ts, "wind_perc": float('nan')})
-
-            all_rows.extend(chunk_rows)
-            logging.info(f"  Fetched {len(chunk_rows)} records for chunk.")
-
+            for rec in js.get("data", []):
+                ts = rec.get("from")
+                mix = rec.get("generationmix", [])
+                wind = next((x["perc"] for x in mix if x.get("fuel")=="wind"), float("nan"))
+                all_rows.append({"datetime": ts, "wind_perc": wind})
         except Exception as e:
-            logging.error(f"  Failed to fetch or parse chunk {current_start}-{chunk_end}: {e}. Skipping chunk.")
-            # Optionally implement logic to retry the chunk later or abort
-
-        # Move to the next chunk
-        current_start += timedelta(days=CI_FETCH_CHUNK_DAYS)
-
-    if not all_rows:
-        logging.error("No Carbon Intensity data could be fetched for the specified period.")
-        return pd.DataFrame(columns=["datetime", "wind_perc"])
+            logging.error(f"    Failed chunk {cur}–{chunk_end}: {e}")
+        cur = chunk_end + timedelta(days=1)
 
     df = pd.DataFrame(all_rows)
     df["datetime"] = pd.to_datetime(df["datetime"], utc=True)
-    # De-duplicate based on datetime, keeping the first occurrence
-    df = df.drop_duplicates(subset=["datetime"], keep="first")
-    df = df.sort_values("datetime").reset_index(drop=True)
-    logging.info(f"Total unique Carbon Intensity records fetched: {len(df)}")
+    df = df.drop_duplicates("datetime").sort_values("datetime").reset_index(drop=True)
+    logging.info(f"Total CI wind % rows fetched: {len(df)}")
     return df
 
-
-# ---------- Open‑Meteo Historical Weather Fetcher -------------------------- #
+# ── FETCH OPEN-METEO ARCHIVE ─────────────────────────────────────────────────
 def fetch_weather_historical(start_date: date, end_date: date) -> pd.DataFrame:
-    """
-    Fetches historical hourly weather data from Open-Meteo Archive API
-    in yearly chunks.
-    """
-    all_meteo_dfs = []
-    current_start = start_date
-
-    logging.info(f"Fetching Open-Meteo weather from {start_date} to {end_date}")
-
-    while current_start <= end_date:
-        # Fetch data year by year, or up to end_date if less than a year remaining
-        chunk_end_year = min(current_start.year + OM_FETCH_CHUNK_YEARS - 1, end_date.year)
-        chunk_end = date(chunk_end_year, 12, 31)
-        # Ensure the final chunk doesn't exceed the overall end_date
+    parts = []
+    cur = start_date
+    logging.info(f"Fetching weather from {start_date} to {end_date}")
+    while cur <= end_date:
+        chunk_end = date(min(cur.year + OM_CHUNK_YEARS - 1, end_date.year), 12, 31)
         chunk_end = min(chunk_end, end_date)
-
-        chunk_start_str = current_start.strftime('%Y-%m-%d')
-        chunk_end_str = chunk_end.strftime('%Y-%m-%d')
-
-        url = (
-            f"{OM_ARCHIVE_URL}?latitude={LAT}&longitude={LON}"
-            f"&hourly={HOURLY_VARS}&start_date={chunk_start_str}&end_date={chunk_end_str}"
-            "&timezone=UTC"
-        )
-        logging.info(f"  Fetching weather chunk: {current_start} to {chunk_end}")
-
+        params = {
+            "latitude": LAT, "longitude": LON,
+            "hourly": HOURLY_VARS,
+            "start_date": cur.strftime("%Y-%m-%d"),
+            "end_date": chunk_end.strftime("%Y-%m-%d"),
+            "timezone": "UTC",
+        }
+        logging.info(f"  Weather chunk: {cur} → {chunk_end}")
         try:
-            js = _make_request(url)
-            time.sleep(1) # Be polite
-
-            if "hourly" not in js or "time" not in js["hourly"]:
-                logging.warning(f"  Unexpected Open-Meteo response for chunk {current_start}-{chunk_end}. Skipping.")
-                # Move to the next year/chunk start
-                current_start = date(chunk_end.year + 1, 1, 1)
-                continue
-
-            df_chunk = pd.DataFrame(js["hourly"])
-            df_chunk = df_chunk.rename(columns={"time": "datetime"})
-            df_chunk["datetime"] = pd.to_datetime(df_chunk["datetime"], utc=True)
-            all_meteo_dfs.append(df_chunk)
-            logging.info(f"  Fetched {len(df_chunk)} weather records for chunk.")
-
+            js = _make_request(OM_ARCHIVE_URL, params=params)
+            hr = js.get("hourly", {})
+            df = pd.DataFrame(hr).rename(columns={"time": "datetime"})
+            df["datetime"] = pd.to_datetime(df["datetime"], utc=True)
+            parts.append(df)
         except Exception as e:
-            logging.error(f"  Failed to fetch weather chunk {current_start}-{chunk_end}: {e}. Skipping chunk.")
-            # Optionally implement logic to retry the chunk later or abort
+            logging.error(f"    Failed weather chunk {cur}–{chunk_end}: {e}")
+        cur = chunk_end + timedelta(days=1)
 
-        # Move to the start of the next chunk (day after the current chunk ended)
-        current_start = chunk_end + timedelta(days=1)
-
-
-    if not all_meteo_dfs:
-        logging.error("No Open-Meteo weather data could be fetched.")
+    if not parts:
         return pd.DataFrame()
+    met = pd.concat(parts, ignore_index=True) \
+             .drop_duplicates("datetime") \
+             .sort_values("datetime") \
+             .reset_index(drop=True)
+    logging.info(f"Total weather rows fetched: {len(met)}")
+    return met
 
-    # Concatenate all chunks
-    meteo_df = pd.concat(all_meteo_dfs, ignore_index=True)
-    meteo_df = meteo_df.drop_duplicates(subset=["datetime"], keep="first")
-    meteo_df = meteo_df.sort_values("datetime").reset_index(drop=True)
-    logging.info(f"Total unique Open-Meteo records fetched: {len(meteo_df)}")
-    return meteo_df
-
-
-# ---------- Main Execution Logic ------------------------------------------- #
+# ── MAIN ─────────────────────────────────────────────────────────────────────
 def main():
-    """Main ETL function for training data."""
-    start_time = time.time()
-    logging.info(f"Starting training ETL run for period: {TRAIN_START_DATE} to {TRAIN_END_DATE}")
+    start = time.time()
 
-    # --- Fetch Historical Data ---
-    wind_perc_df = fetch_ci_wind_perc_historical(TRAIN_START_DATE, TRAIN_END_DATE)
-    if wind_perc_df.empty:
-        logging.error("Failed to fetch historical wind percentage data. Aborting.")
-        return
+    wind_df  = fetch_ci_wind_perc_historical(TRAIN_START_DATE, TRAIN_END_DATE)
+    wind_df.to_parquet(WIND_OUT_PATH, index=False)
+    logging.info(f"Saved CI wind % → {WIND_OUT_PATH}")
 
-    meteo_df = fetch_weather_historical(TRAIN_START_DATE, TRAIN_END_DATE)
-    if meteo_df.empty:
-        logging.error("Failed to fetch historical weather data. Aborting.")
-        return
+    met_df   = fetch_weather_historical(TRAIN_START_DATE, TRAIN_END_DATE)
+    met_df.to_parquet(METEO_OUT_PATH, index=False)
+    logging.info(f"Saved weather history → {METEO_OUT_PATH}")
 
-    # --- Save Data ---
-    logging.info(f"Saving historical wind percentage data to {WIND_OUT_PATH}")
-    wind_perc_df.to_parquet(WIND_OUT_PATH, index=False)
-
-    logging.info(f"Saving historical weather data to {METEO_OUT_PATH}")
-    meteo_df.to_parquet(METEO_OUT_PATH, index=False)
-
-    end_time = time.time()
-    logging.info(f"Training ETL finished successfully in {end_time - start_time:.2f} seconds.")
+    logging.info(f"Training ETL finished in {time.time() - start:.1f}s")
 
 if __name__ == "__main__":
     main()

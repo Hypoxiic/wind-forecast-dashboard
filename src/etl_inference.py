@@ -29,7 +29,7 @@ RAW_DIR = DATA_DIR / "raw"
 RAW_DIR.mkdir(parents=True, exist_ok=True)
 
 # Output file names expected by downstream scripts (even if content differs)
-WIND_OUT_PATH = RAW_DIR / "eso_wind.parquet"
+WIND_OUT_PATH = RAW_DIR / "ci.parquet"
 METEO_OUT_PATH = RAW_DIR / "openmeteo_weather.parquet"
 
 # --------------------------------------------------------------------------- #
@@ -60,13 +60,16 @@ def _make_request(url: str, params: dict | None = None, headers: dict | None = N
 # ---------- Carbon‑Intensity Wind Percentage (Yesterday) ------------------- #
 def fetch_ci_wind_perc_history(today: date, days_history: int = 3) -> pd.DataFrame:
     """
-    Fetches wind generation percentage for the specified number of past days.
+    Fetches wind generation percentage for the specified number of past days up to and including today.
     """
-    start_date = today - timedelta(days=days_history)
-    end_date = today - timedelta(days=1) # Fetch up to the end of yesterday
+    # start_date remains X days ago to provide context for lags if needed by other processes
+    # but the primary goal is to get data up to 'today'
+    start_date_ci = today - timedelta(days=days_history) 
+    end_date_ci = today # Fetch up to and including today
 
-    from_dt_str = start_date.strftime('%Y-%m-%dT00:00Z')
-    to_dt_str = end_date.strftime('%Y-%m-%dT23:30Z') # Ensure we get the last interval of yesterday
+    from_dt_str = start_date_ci.strftime('%Y-%m-%dT00:00Z')
+    # For 'to' date, CI API typically includes the whole day. So T23:30Z for 'today' is fine.
+    to_dt_str = end_date_ci.strftime('%Y-%m-%dT23:30Z') 
 
     url = f"{CI_API_BASE_URL}/generation/{from_dt_str}/{to_dt_str}"
     logging.info(f"Fetching Carbon Intensity generation data from: {url}")
@@ -100,7 +103,7 @@ def fetch_ci_wind_perc_history(today: date, days_history: int = 3) -> pd.DataFra
             rows.append({"datetime": ts, "wind_perc": float('nan')}) # Or use 0 if preferred
 
     if not rows:
-        logging.warning(f"No valid wind percentage data found for the period {start_date} to {end_date}.")
+        logging.warning(f"No valid wind percentage data found for the period {start_date_ci} to {end_date_ci}.")
         return pd.DataFrame(columns=["datetime", "wind_perc"])
 
     df = pd.DataFrame(rows)
@@ -126,6 +129,11 @@ def fetch_weather_history(today: date, days_history: int = 3) -> pd.DataFrame:
         df = pd.DataFrame(js["hourly"])
         df = df.rename(columns={"time": "datetime"})
         df["datetime"] = pd.to_datetime(df["datetime"], utc=True)
+        # Fill NaNs for weather variables
+        weather_cols = HOURLY_VARS.split(',')
+        for col in weather_cols:
+            if col in df.columns:
+                df[col] = df[col].ffill().bfill()
         return df
     except Exception as e:
         logging.error(f"Failed to fetch past weather: {e}")
@@ -150,6 +158,11 @@ def fetch_weather_forecast(today: date) -> pd.DataFrame:
         df = pd.DataFrame(js["hourly"])
         df = df.rename(columns={"time": "datetime"})
         df["datetime"] = pd.to_datetime(df["datetime"], utc=True)
+        # Fill NaNs for weather variables
+        weather_cols = HOURLY_VARS.split(',')
+        for col in weather_cols:
+            if col in df.columns:
+                df[col] = df[col].ffill().bfill()
         # Forecast API might give more than 48h, ensure we only take needed range
         forecast_end_time = pd.Timestamp(f"{end_date} 23:59:59", tz='UTC')
         df = df[df['datetime'] <= forecast_end_time].reset_index(drop=True)
@@ -180,6 +193,7 @@ def main():
         logging.error("Failed to get historical weather data. Aborting.")
         return
     logging.info(f"Fetched {len(meteo_history_df)} rows of historical weather.")
+    logging.info(f"NaNs in meteo_history_df:\n{meteo_history_df.isnull().sum().to_string()}")
 
     logging.info("Fetching Open‑Meteo weather (forecast 48h)...")
     meteo_forecast_df = fetch_weather_forecast(today)
@@ -187,6 +201,7 @@ def main():
         logging.error("Failed to get forecast weather data. Aborting.")
         return
     logging.info(f"Fetched {len(meteo_forecast_df)} rows of forecast weather.")
+    logging.info(f"NaNs in meteo_forecast_df:\n{meteo_forecast_df.isnull().sum().to_string()}")
 
     # --- Combine Weather Data ---
     meteo_df = pd.concat([meteo_history_df, meteo_forecast_df], ignore_index=True)

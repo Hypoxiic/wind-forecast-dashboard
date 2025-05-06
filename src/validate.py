@@ -14,7 +14,7 @@ from collections import defaultdict
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 
 DATA_DIR = Path("data")
-FEATURES_PATH = DATA_DIR / "features" / "features.parquet"
+FEATURES_PATH = DATA_DIR / "features" / "training_features.parquet"
 CV_METRICS_PATH = Path("cv_metrics.json") # Save CV metrics in root directory
 
 TARGET = "wind_perc"
@@ -32,6 +32,14 @@ df = pd.read_parquet(FEATURES_PATH)
 df["datetime"] = pd.to_datetime(df["datetime"]) # Ensure datetime type
 df = df.sort_values("datetime").reset_index(drop=True) # Ensure sorted for CV
 logging.info(f"Loaded DataFrame shape: {df.shape}")
+
+# Drop rows where the target variable is NaN
+df.dropna(subset=[TARGET], inplace=True)
+logging.info(f"DataFrame shape after dropping NaN targets: {df.shape}")
+
+if df.empty:
+    logging.error(f"No data left after dropping NaN from target column '{TARGET}'. Check training_features.parquet.")
+    raise ValueError(f"DataFrame empty after dropping NaNs from target '{TARGET}'.")
 
 # Define features (X) and target (y)
 FEATURES = [col for col in df.columns if col not in ["datetime", "wind_mw", TARGET]]

@@ -43,7 +43,7 @@ except Exception as e:
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 
 DATA_DIR   = Path("data")
-FEAT_PATH  = DATA_DIR / "features" / "features.parquet"
+FEAT_PATH  = DATA_DIR / "features" / "training_features.parquet"
 PRED_DIR   = DATA_DIR / "predictions"
 MODELS_DIR = Path("models")
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
@@ -70,6 +70,16 @@ logging.info(f"Data shape: {df.shape}")
 # capacity_mw          = df["wind_mw"].max()
 
 TARGET        = "wind_perc"  # <-- CHANGED target
+
+# Drop rows where the target variable is NaN before splitting X and y
+df.dropna(subset=[TARGET], inplace=True)
+logging.info(f"Data shape after dropping NaN targets: {df.shape}")
+
+if df.empty:
+    logging.error(f"No data left after dropping NaN from target column '{TARGET}'. Check feature generation.")
+    # Exit or raise an error, as training cannot proceed
+    raise ValueError(f"DataFrame empty after dropping NaNs from target '{TARGET}'.")
+
 CAT_FEATURES  = ["is_holiday"]
 # <-- CHANGED features list to exclude wind_mw and the new target wind_perc
 FEATURES      = [c for c in df.columns if c not in {"datetime", "wind_mw", TARGET}]
@@ -169,7 +179,7 @@ def objective(trial: optuna.Trial) -> float:
 # ──────────────────────────
 # Hyper‑parameter tuning
 # ──────────────────────────
-N_TRIALS = 75
+N_TRIALS = 100
 logging.info(f"Optuna study starts – {N_TRIALS} GPU trials with inner tqdm fold bars.")
 study = optuna.create_study(direction="minimize", study_name="wind_catboost_gpu_tuning")
 study.optimize(objective, n_trials=N_TRIALS, show_progress_bar=True)

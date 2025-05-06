@@ -1,16 +1,17 @@
 {
-    "optuna_best_cv_rmse": 1.2775184205209487,
-    "holdout_rmse_perc": 0.9576234005935763,
-    "holdout_mape_perc": 0.014973411868199386,
+    "optuna_best_cv_rmse": 1.3737734177858552,
+    "holdout_rmse_perc": 1.8881316561523,
+    "holdout_mape_perc": 0.03831727635041152,
     "best_params": {
-        "bootstrap_type": "Bernoulli",
-        "iterations": 2899,
-        "depth": 7,
-        "lr": 0.1290086754090022,
-        "l2": 11.113166000205418,
-        "subsample": 0.6637487515196121,
+        "bootstrap_type": "Bayesian",
+        "iterations": 3545,
+        "depth": 6,
+        "lr": 0.0957696869890991,
+        "l2": 2.6623716739337926,
+        "subsample": 0.8600241529570138,
         "boosting_type": "Plain",
-        "random_strength": 0.00013260320344589828,
-        "border_count": 235
+        "random_strength": 0.0013661063052095366,
+        "border_count": 255,
+        "bagging_temperature": 0.6322289278413673
     }
 }
