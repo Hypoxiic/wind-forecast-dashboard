@@ -6,7 +6,7 @@ Live demo → [https://wind‑forecast-dashboard.onrender.com](https://wind‑fo
 
 > **Note:** This project uses the [Carbon Intensity API](https://carbonintensity.org.uk/) for wind generation data (percentage contribution, 0-100%) and the [Open-Meteo API](https://open-meteo.com/) for weather forecasts.
 
-![GB Wind Forecast Dashboard Screenshot](docs/images/dashboard_screenshot.png)
+![GB Wind Forecast Dashboard Screenshot](docs/images/dashboard.png)
 
 ## Dashboard Features
 
