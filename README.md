@@ -6,6 +6,19 @@ Live demo → [https://wind‑forecast-dashboard.onrender.com](https://wind‑fo
 
 > **Note:** This project uses the [Carbon Intensity API](https://carbonintensity.org.uk/) for wind generation data (percentage contribution, 0-100%) and the [Open-Meteo API](https://open-meteo.com/) for weather forecasts.
 
+![GB Wind Forecast Dashboard Screenshot](docs/images/dashboard_screenshot.png)
+
+## Dashboard Features
+
+- **Interactive Chart**: Real-time visualization of actual wind generation and model predictions
+- **Error Analysis**: Shows prediction error with a dedicated error panel below the main chart
+- **Data Filtering**: Quick filter buttons (24h, 7d, 30d, All Time) and custom date range selection
+- **Multiple Views**: Forecast & Recent tab (showing recent history + 2 days forecast) and Historical Analysis tab
+- **Performance Metrics**: Clear display of model performance metrics (RMSE, MAPE) vs baseline
+- **Data Export**: Functionality to export raw data for further analysis
+- **Responsive Design**: Works well on desktop and mobile devices
+- **Dark/Light Mode**: Toggle between dark and light themes
+
 ---
 
 ## 1  Business context
@@ -49,7 +62,7 @@ Displays data via dashboard/app.py in two tabs:
 
 ### Nightly refresh
 
-A GitHub Actions workflow (`.github/workflows/nightly.yml`) runs at **01 : 30 UTC** every night:
+A GitHub Actions workflow (`.github/workflows/nightly.yml`) runs at **01:30 UTC** every night:
 
 1. Executes `src/pipeline.py` which:
     a. Fetches latest actual wind % (inc. today) and weather (history + 48h forecast) using `src/etl_inference.py`.

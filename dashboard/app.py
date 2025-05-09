@@ -319,7 +319,7 @@ app.layout = dbc.Container([
                 dbc.Col(date_picker_global, width=4),
                 dbc.Col(html.Div([
                     html.Span("Last updated: ", className="text-muted"),
-                    html.Span(pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"))
+                    html.Span(pd.Timestamp.now().strftime("%Y-%m-%d") + " 01:30 UTC")
                 ]), width=4, className="text-end")
             ], align="center")
         ])
@@ -577,7 +577,7 @@ def render_content(is_dark, active_tab, series_sel, start_d_global, end_d_global
                 # Add last updated timestamp
                 html.Div([
                     html.Span("Last updated: ", className="text-muted"),
-                    html.Span(pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"))
+                    html.Span(pd.Timestamp.now().strftime("%Y-%m-%d") + " 01:30 UTC")
                 ], className="mb-3 text-end"),
                 
                 # Main chart with export button
@@ -827,7 +827,7 @@ def render_content(is_dark, active_tab, series_sel, start_d_global, end_d_global
                 # Add last updated timestamp and export button
                 html.Div([
                     html.Span("Last updated: ", className="text-muted"),
-                    html.Span(pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")),
+                    html.Span(pd.Timestamp.now().strftime("%Y-%m-%d") + " 01:30 UTC"),
                     dbc.Button(
                         "Export Data", 
                         color="secondary", 
