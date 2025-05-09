@@ -20,7 +20,7 @@ from datetime import date
 import numpy as np
 import pandas as pd
 import plotly.express as px
-from dash import Dash, Input, Output, dcc, html
+from dash import Dash, Input, Output, dcc, html, callback_context, no_update
 import dash_bootstrap_components as dbc
 from dash_bootstrap_templates import ThemeSwitchAIO, load_figure_template
 from sklearn.metrics import mean_absolute_percentage_error, mean_squared_error
@@ -61,9 +61,9 @@ FULL_HIST_PREDS_PATH = ROOT / "models" / "catboost_full.parquet"
 METRICS_PATH     = ROOT / "metrics.json"
 
 COLOR_MAP = {
-    "wind_perc":        "#2ca02c",  # green for actual
+    "wind_perc":        "#1E88E5",  # blue for actual (previously green)
     "wind_perc_lag_48h":"#1f77b4",  # blue for baseline
-    "wind_perc_pred":   "#ff7f0e",  # orange for prediction
+    "wind_perc_pred":   "#FF8F00",  # amber for prediction (previously orange)
 }
 
 THEME_LIGHT = "simple_white"
@@ -187,10 +187,23 @@ def delta_colour(val, base, lower_better=True):
 def make_card(title, value, unit, colour, tooltip=None):
     cid = str(uuid.uuid4())
     body = dbc.CardBody(html.H4(f"{value}{unit}", className="card-title"))
+    
+    # Custom styles for the card
+    card_style = {"height":"100px", "padding": "12px", "border-radius": "8px", "box-shadow": "0 2px 4px rgba(0,0,0,0.1)"}
+    
+    # Add green border for all cards except metric cards (baseline and model)
+    if not (title.startswith("Baseline") or title.startswith("Model")):
+        card_style["border"] = "2px solid #2E7D32"
+    else:
+        card_style["border"] = "none"  # Remove border for metric cards
+    
+    # Revert back to standard colors for cards, but keep the borders consistent
+    inverse = (colour not in ["light", "secondary"])
+    
     card = dbc.Card([dbc.CardHeader(title), body],
                     id=cid, color=colour,
-                    inverse=(colour not in ["light","secondary"]),
-                    className="shadow-sm", style={"height":"100px"})
+                    inverse=inverse,
+                    className="shadow-sm", style=card_style)
     if tooltip:
         return dbc.Col([card, dbc.Tooltip(tooltip, target=cid, placement="top")])
     return dbc.Col(card)
@@ -226,6 +239,7 @@ series_dd = dcc.Dropdown(
         {"label":"Baseline (lag 48h %)", "value":"wind_perc_lag_48h"},
         {"label":"Prediction (%)",       "value":"wind_perc_pred"},
     ],
+    style={"width": "300px"}
 )
 
 date_picker_global = dcc.DatePickerRange(
@@ -237,14 +251,30 @@ date_picker_global = dcc.DatePickerRange(
     display_format="DD/MM/YYYY",
 )
 
+# Add quick date filter buttons
+def create_date_preset_buttons():
+    today = pd.Timestamp.today().date()
+    yesterday = today - pd.Timedelta(days=1)
+    last_7_days = today - pd.Timedelta(days=7)
+    last_30_days = today - pd.Timedelta(days=30)
+    
+    return html.Div([
+        dbc.Button("Last 24h", id="btn-last-24h", color="primary", size="sm", className="me-2"),
+        dbc.Button("Last 7d", id="btn-last-7d", color="secondary", size="sm", className="me-2"),
+        dbc.Button("Last 30d", id="btn-last-30d", color="secondary", size="sm", className="me-2"),
+        dbc.Button("All Time", id="btn-all-time", color="secondary", size="sm"),
+    ], className="mb-3")
+
 app.layout = dbc.Container([
     dbc.Row([
-        dbc.Col(html.H2("GB Wind Day-Ahead Forecast", className="display-6"), width=10),
-        dbc.Col(ThemeSwitchAIO(aio_id="theme",
-                               themes=[CSS_LIGHT, CSS_DARK],
-                               switch_props={"style":{"marginTop":"12px"}}),
-                width=2),
-    ], align="center"),
+        dbc.Col(html.H2("GB Wind Day-Ahead Forecast", className="display-6"), width=8),
+        dbc.Col([
+            dbc.Button("Export Data", id="btn-export-main", color="secondary", size="sm", className="me-2"),
+            ThemeSwitchAIO(aio_id="theme",
+                          themes=[CSS_LIGHT, CSS_DARK],
+                          switch_props={"style":{"marginTop":"12px"}})
+        ], width=4, className="text-end"),
+    ], align="center", className="mb-3"),
     
     html.Div(id="kpi-cards-row"), 
 
@@ -262,26 +292,42 @@ app.layout = dbc.Container([
           f"MAPE ≈ {cat_mape*100:.1f}%.",
           className="fst-italic small mb-0"
         )
-    ]), className="mb-4 border-0 shadow-sm"),
+    ]), className="mb-4 border-0 shadow-sm", style={"border": "2px solid #2E7D32", "padding": "12px", "border-radius": "8px", "box-shadow": "0 2px 4px rgba(0,0,0,0.1)"}),
 
-    # Add controls card to the main layout
-    dbc.Card(dbc.CardBody([
-        dbc.Row([
-            dbc.Col(html.Label("Series:"), width="auto"),
-            dbc.Col(series_dd, width=5, className="me-3"),
-            dbc.Col(html.Label("Date range:"), width="auto", className="pt-2"),
-            dbc.Col(date_picker_global, width=4),
-        ], align="center")
-    ]), className="mb-4 shadow-sm"),
+    # Add date preset buttons
+    create_date_preset_buttons(),
     
-    dbc.Tabs([
-        dbc.Tab(label="Forecast & Recent", tab_id="forecast_recent", className="fw-bold"),
-        dbc.Tab(label="Historical Analysis", tab_id="historical", className="fw-bold"),
-    ], id="tabs", active_tab="forecast_recent", className="mb-3"),
+    # Combine tabs and series selector in one row
+    dbc.Row([
+        dbc.Col([
+            dbc.Tabs([
+                dbc.Tab(label="Forecast & Recent", tab_id="forecast_recent", className="fw-bold"),
+                dbc.Tab(label="Historical Analysis", tab_id="historical", className="fw-bold"),
+            ], id="tabs", active_tab="forecast_recent", className="mb-0"),
+        ], width=8),
+        dbc.Col([
+            html.Label("Series:", className="me-2", style={"display": "inline-block"}),
+            html.Div(series_dd, style={"display": "inline-block", "vertical-align": "middle"}),
+        ], width=4, className="text-end"),
+    ], className="align-items-center mb-3"),
+    
+    # Move date range selector to a more intuitive design
+    dbc.Card([
+        dbc.CardBody([
+            dbc.Row([
+                dbc.Col(html.Label("Date Range:", className="pt-2"), width="auto"),
+                dbc.Col(date_picker_global, width=4),
+                dbc.Col(html.Div([
+                    html.Span("Last updated: ", className="text-muted"),
+                    html.Span(pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"))
+                ]), width=4, className="text-end")
+            ], align="center")
+        ])
+    ], className="mb-4", style={"border": "2px solid #2E7D32", "padding": "12px", "border-radius": "8px", "box-shadow": "0 2px 4px rgba(0,0,0,0.1)"}),
     
     html.Div(id="tab-content"),
     
-], fluid=True, className="dbc dbc-row-selectable", style={"maxWidth":"1400px","paddingTop":"18px"})
+], fluid=True, className="dbc dbc-row-selectable", style={"maxWidth":"1400px", "paddingTop":"18px"})
 
 # ─── Callbacks ──────────────────────────────────────────────────────────────
 @app.callback(
@@ -333,10 +379,238 @@ def render_content(is_dark, active_tab, series_sel, start_d_global, end_d_global
                 template=template, color_discrete_map=COLOR_MAP,
                 labels={"value":"Wind Gen. (% of mix)", "variable":"Series"}
             )
-            fig_fc.update_layout(margin={"t":30,"b":30,"l":30,"r":30}, title_text="Forecast & Recent Data (Last 3 Days History + 2 Days Forecast)", title_x=0.5)
-            if light_bg: fig_fc.update_layout(paper_bgcolor="white", plot_bgcolor="white")
+            
+            # Chart enhancements
+            for trace in fig_fc.data:
+                # Increase line thickness to 2.5px
+                trace.line.width = 2.5
+                # Add subtle point markers every 6 hours
+                trace.mode = 'lines+markers'
+                trace.marker.size = 8
+                trace.marker.opacity = 0.8
+                # Make markers more visible
+                trace.marker.line = dict(width=1, color='white')
+                trace.marker.symbol = "circle"
+                
+                # Remove area fill - use lines only as requested
+                trace.fill = None
+                
+                # If this is the actual wind data (blue line), make it more prominent
+                if trace.name == "wind_perc":
+                    trace.line.width = 3.0
+                    trace.marker.size = 9
+                    trace.zorder = 10  # Try to keep it on top
+            
+            # Add light gray vertical lines at midnight transitions
+            for day in pd.date_range(start=df_forecast_tab.datetime.min().floor('D'), 
+                                    end=df_forecast_tab.datetime.max().ceil('D'), 
+                                    freq='D'):
+                fig_fc.add_vline(x=day, line_width=1, line_dash="dot", 
+                                line_color="rgba(150, 150, 150, 0.3)")
+            
+            # Layout enhancements
+            fig_fc.update_layout(
+                margin={"t":30,"b":30,"l":30,"r":30}, 
+                title_text="Forecast & Recent Data (Last 3 Days History + 2 Days Forecast)", 
+                title_x=0.5
+            )
+            
+            # Add dark mode gradient overlay if in dark mode
+            if not light_bg:
+                fig_fc.update_layout(
+                    paper_bgcolor="rgb(13,18,30)",
+                    plot_bgcolor="rgb(13,18,30)",
+                    # Improve grid visibility for better readability
+                    xaxis=dict(
+                        gridcolor="rgba(255, 255, 255, 0.1)",
+                        zerolinecolor="rgba(255, 255, 255, 0.1)"
+                    ),
+                    yaxis=dict(
+                        gridcolor="rgba(255, 255, 255, 0.1)",
+                        zerolinecolor="rgba(255, 255, 255, 0.1)"
+                    )
+                )
+            else:
+                fig_fc.update_layout(
+                    paper_bgcolor="white", 
+                    plot_bgcolor="white",
+                    # Improve grid visibility for better readability
+                    xaxis=dict(
+                        gridcolor="rgba(0, 0, 0, 0.1)",
+                        zerolinecolor="rgba(0, 0, 0, 0.1)"
+                    ),
+                    yaxis=dict(
+                        gridcolor="rgba(0, 0, 0, 0.1)",
+                        zerolinecolor="rgba(0, 0, 0, 0.1)"
+                    )
+                )
+                
             dash_logger.info(f"Forecast tab: Plotting {len(df_forecast_tab)} rows.")
-            fig_forecast_content = dcc.Graph(figure=fig_fc)
+            
+            # Create error panel showing difference between prediction and actual
+            error_df = df_forecast_tab.copy()
+            error_df["prediction_error"] = error_df["wind_perc_pred"] - error_df["wind_perc"]
+            error_df = error_df.dropna(subset=["prediction_error"])
+            
+            if not error_df.empty:
+                # Get the min and max dates from the main chart for proper alignment
+                x_min = df_forecast_tab.datetime.min()
+                x_max = df_forecast_tab.datetime.max()
+                
+                fig_error = px.line(
+                    error_df, x="datetime", y="prediction_error",
+                    template=template,
+                    labels={"prediction_error": "Prediction Error (%)", "datetime": ""}
+                )
+                
+                # Style the error chart
+                fig_error.update_traces(
+                    line_color="#1E88E5", 
+                    line_width=2,
+                    # Use the same color family as main chart with very subtle fill
+                    mode='lines',
+                    fill='tozeroy',
+                    fillcolor='rgba(30, 136, 229, 0.05)'
+                )
+                
+                # Explicitly set the same x-axis range
+                fig_error.update_layout(
+                    height=150, 
+                    margin={"t":10,"b":30,"l":30,"r":30},
+                    showlegend=False,
+                    # Ensure identical time range as main chart
+                    xaxis=dict(
+                        range=[x_min, x_max],
+                        gridcolor="rgba(255, 255, 255, 0.1)" if not light_bg else "rgba(0, 0, 0, 0.1)",
+                        # Match the main chart's tick format
+                        tickformat="%H:%M\n%b %d",
+                        # Reduce number of ticks to match main chart
+                        nticks=10
+                    ),
+                    yaxis=dict(
+                        title="Error (%)",
+                        gridcolor="rgba(255, 255, 255, 0.1)" if not light_bg else "rgba(0, 0, 0, 0.1)"
+                    )
+                )
+                
+                # Add a horizontal zero line
+                fig_error.add_hline(
+                    y=0, 
+                    line_color="rgba(255, 255, 255, 0.4)" if not light_bg else "rgba(0, 0, 0, 0.4)", 
+                    line_width=1
+                )
+                
+                # Format the error chart to better align with main chart
+                fig_fc.update_layout(
+                    xaxis=dict(
+                        tickformat="%H:%M\n%b %d",
+                        nticks=10
+                    )
+                )
+                
+                error_chart = dcc.Graph(figure=fig_error)
+            else:
+                error_chart = html.Div("No error data available", className="text-center py-3")
+            
+            # Create a small table showing numeric values at 6-hour intervals
+            interval_df = df_forecast_tab[df_forecast_tab.datetime.dt.hour % 6 == 0].copy()
+            
+            if not interval_df.empty:
+                interval_df = interval_df.sort_values("datetime", ascending=False).head(8)
+                
+                # Format the data for display
+                interval_df["datetime"] = interval_df["datetime"].dt.strftime("%Y-%m-%d %H:%M")
+                interval_df["wind_perc"] = interval_df["wind_perc"].round(1)
+                interval_df["wind_perc_pred"] = interval_df["wind_perc_pred"].round(1)
+                
+                # Create table columns based on available data
+                columns = [{"name": "Timestamp", "id": "datetime"}]
+                data = []
+                
+                for idx, row in interval_df.iterrows():
+                    data_row = {"datetime": row["datetime"]}
+                    
+                    if not np.isnan(row["wind_perc"]):
+                        data_row["actual"] = f"{row['wind_perc']}%"
+                        if "actual" not in [c["id"] for c in columns]:
+                            columns.append({"name": "Actual", "id": "actual"})
+                    
+                    if not np.isnan(row["wind_perc_pred"]):
+                        data_row["predicted"] = f"{row['wind_perc_pred']}%"
+                        if "predicted" not in [c["id"] for c in columns]:
+                            columns.append({"name": "Predicted", "id": "predicted"})
+                    
+                    data.append(data_row)
+                
+                values_table = dbc.Table.from_dataframe(
+                    pd.DataFrame(data),
+                    striped=True,
+                    bordered=True,
+                    hover=True,
+                    responsive=True,
+                    size="sm",
+                    className="mt-3"
+                )
+            else:
+                values_table = html.Div("No interval data available", className="text-center py-2")
+            
+            # Determine wind trend
+            if not df_forecast_tab.empty and "wind_perc" in df_forecast_tab.columns:
+                latest_values = df_forecast_tab.dropna(subset=["wind_perc"]).tail(12)
+                if len(latest_values) >= 2:
+                    first_half = latest_values.head(len(latest_values) // 2)["wind_perc"].mean()
+                    second_half = latest_values.tail(len(latest_values) // 2)["wind_perc"].mean()
+                    trend_direction = "↑" if second_half > first_half else "↓"
+                    trend_color = "success" if second_half > first_half else "danger"
+                    trend_indicator = dbc.Alert(
+                        f"Current Wind Trend: {trend_direction} {round(abs(second_half - first_half), 1)}%",
+                        color=trend_color,
+                        className="mt-3 py-2",
+                        style={"width": "fit-content"}
+                    )
+                else:
+                    trend_indicator = None
+            else:
+                trend_indicator = None
+            
+            fig_forecast_content = html.Div([
+                # Add last updated timestamp
+                html.Div([
+                    html.Span("Last updated: ", className="text-muted"),
+                    html.Span(pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"))
+                ], className="mb-3 text-end"),
+                
+                # Main chart with export button
+                html.Div([
+                    dbc.Button(
+                        "Export Data", 
+                        color="secondary", 
+                        size="sm", 
+                        className="mb-2 float-end",
+                        id="btn-export-data"
+                    ),
+                    dcc.Graph(figure=fig_fc),
+                ]),
+                
+                # Error chart
+                error_chart,
+                
+                # Wind trend indicator alongside interval data table
+                dbc.Row([
+                    dbc.Col(trend_indicator, width="auto") if trend_indicator else None,
+                    dbc.Col(values_table, width=12 if not trend_indicator else None),
+                ], className="mt-3"),
+                
+                # Legend explaining the downward arrows in metrics
+                dbc.Alert(
+                    [
+                        html.H6("Metric Indicators", className="alert-heading mb-2"),
+                        html.P("↓ indicates improvement (lower error is better)", className="mb-0 small")
+                    ],
+                    color="light",
+                    className="mt-3"
+                )
+            ])
         
         tab_specific_content = [fig_forecast_content] # Just the graph for this tab now
 
@@ -393,14 +667,222 @@ def render_content(is_dark, active_tab, series_sel, start_d_global, end_d_global
                 template=template, color_discrete_map=COLOR_MAP,
                 labels={"value":"Wind Gen. (% of mix)", "variable":"Series"}
             )
-            fig_hist.update_layout(margin={"t":30,"b":30,"l":30,"r":30}, title_text="Historical Data Analysis", title_x=0.5)
-            if light_bg: fig_hist.update_layout(paper_bgcolor="white", plot_bgcolor="white")
-            fig_historical_content = dcc.Graph(figure=fig_hist)
+            
+            # Chart enhancements
+            for trace in fig_hist.data:
+                # Increase line thickness to 2.5px
+                trace.line.width = 2.5
+                # Add subtle point markers every 6 hours
+                trace.mode = 'lines+markers'
+                trace.marker.size = 8
+                trace.marker.opacity = 0.8
+                # Make markers more visible
+                trace.marker.line = dict(width=1, color='white')
+                trace.marker.symbol = "circle"
+                
+                # Remove area fill - use lines only as requested
+                trace.fill = None
+                
+                # If this is the actual wind data (blue line), make it more prominent
+                if trace.name == "wind_perc":
+                    trace.line.width = 3.0
+                    trace.marker.size = 9
+                    trace.zorder = 10  # Try to keep it on top
+            
+            # Add light gray vertical lines at midnight transitions
+            for day in pd.date_range(start=df_hist_tab.datetime.min().floor('D'), 
+                                    end=df_hist_tab.datetime.max().ceil('D'), 
+                                    freq='D'):
+                fig_hist.add_vline(x=day, line_width=1, line_dash="dot", 
+                                line_color="rgba(150, 150, 150, 0.3)")
+            
+            # Layout enhancements
+            fig_hist.update_layout(
+                margin={"t":30,"b":30,"l":30,"r":30}, 
+                title_text="Historical Data Analysis", 
+                title_x=0.5
+            )
+            
+            # Add dark mode gradient overlay if in dark mode
+            if not light_bg:
+                fig_hist.update_layout(
+                    paper_bgcolor="rgb(13,18,30)",
+                    plot_bgcolor="rgb(13,18,30)",
+                    # Improve grid visibility for better readability
+                    xaxis=dict(
+                        gridcolor="rgba(255, 255, 255, 0.1)",
+                        zerolinecolor="rgba(255, 255, 255, 0.1)"
+                    ),
+                    yaxis=dict(
+                        gridcolor="rgba(255, 255, 255, 0.1)",
+                        zerolinecolor="rgba(255, 255, 255, 0.1)"
+                    )
+                )
+            else:
+                fig_hist.update_layout(
+                    paper_bgcolor="white", 
+                    plot_bgcolor="white",
+                    # Improve grid visibility for better readability
+                    xaxis=dict(
+                        gridcolor="rgba(0, 0, 0, 0.1)",
+                        zerolinecolor="rgba(0, 0, 0, 0.1)"
+                    ),
+                    yaxis=dict(
+                        gridcolor="rgba(0, 0, 0, 0.1)",
+                        zerolinecolor="rgba(0, 0, 0, 0.1)"
+                    )
+                )
+                
+            # Create error panel showing difference between prediction and actual
+            error_df = df_hist_tab.copy()
+            error_df["prediction_error"] = error_df["wind_perc_pred"] - error_df["wind_perc"]
+            error_df = error_df.dropna(subset=["prediction_error"])
+            
+            if not error_df.empty:
+                # Get the min and max dates from the main chart for proper alignment
+                x_min = df_hist_tab.datetime.min()
+                x_max = df_hist_tab.datetime.max()
+                
+                fig_error = px.line(
+                    error_df, x="datetime", y="prediction_error",
+                    template=template,
+                    labels={"prediction_error": "Prediction Error (%)", "datetime": ""}
+                )
+                
+                # Style the error chart
+                fig_error.update_traces(
+                    line_color="#1E88E5", 
+                    line_width=2,
+                    # Use the same color family as main chart with very subtle fill
+                    mode='lines',
+                    fill='tozeroy',
+                    fillcolor='rgba(30, 136, 229, 0.05)'
+                )
+                
+                # Explicitly set the same x-axis range
+                fig_error.update_layout(
+                    height=150, 
+                    margin={"t":10,"b":30,"l":30,"r":30},
+                    showlegend=False,
+                    # Ensure identical time range as main chart
+                    xaxis=dict(
+                        range=[x_min, x_max],
+                        gridcolor="rgba(255, 255, 255, 0.1)" if not light_bg else "rgba(0, 0, 0, 0.1)",
+                        # Match the main chart's tick format
+                        tickformat="%H:%M\n%b %d",
+                        # Reduce number of ticks to match main chart
+                        nticks=10
+                    ),
+                    yaxis=dict(
+                        title="Error (%)",
+                        gridcolor="rgba(255, 255, 255, 0.1)" if not light_bg else "rgba(0, 0, 0, 0.1)"
+                    )
+                )
+                
+                # Add a horizontal zero line
+                fig_error.add_hline(
+                    y=0, 
+                    line_color="rgba(255, 255, 255, 0.4)" if not light_bg else "rgba(0, 0, 0, 0.4)", 
+                    line_width=1
+                )
+                
+                # Format the error chart to better align with main chart
+                fig_hist.update_layout(
+                    xaxis=dict(
+                        tickformat="%H:%M\n%b %d",
+                        nticks=10
+                    )
+                )
+                
+                error_content = dcc.Graph(figure=fig_error)
+            else:
+                error_content = dbc.Alert("No error data available for the selected range", color="light")
+            
+            # Create a small table showing numeric values at 6-hour intervals (sample only)
+            sample_interval = max(1, len(df_hist_tab) // 8)  # Get up to 8 sample points
+            interval_df = df_hist_tab.iloc[::sample_interval].head(8).copy()
+            
+            if not interval_df.empty:
+                # Format the data for display
+                interval_df["datetime"] = interval_df["datetime"].dt.strftime("%Y-%m-%d %H:%M")
+                interval_df["wind_perc"] = interval_df["wind_perc"].round(1)
+                interval_df["wind_perc_pred"] = interval_df["wind_perc_pred"].round(1)
+                
+                values_table = dbc.Table.from_dataframe(
+                    interval_df[["datetime", "wind_perc", "wind_perc_pred"]].rename(
+                        columns={"datetime": "Timestamp", "wind_perc": "Actual (%)", "wind_perc_pred": "Predicted (%)"}
+                    ),
+                    striped=True, 
+                    bordered=True,
+                    hover=True,
+                    responsive=True,
+                    size="sm",
+                    className="mt-3",
+                )
+            else:
+                values_table = html.Div("No interval data available", className="text-center py-2")
+            
+            # Main page content
+            fig_historical_content = html.Div([
+                # Add last updated timestamp and export button
+                html.Div([
+                    html.Span("Last updated: ", className="text-muted"),
+                    html.Span(pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")),
+                    dbc.Button(
+                        "Export Data", 
+                        color="secondary", 
+                        size="sm", 
+                        className="float-end",
+                        id="btn-export-hist-data"
+                    ),
+                ], className="mb-3 d-flex justify-content-between"),
+                
+                # Main chart
+                dcc.Graph(figure=fig_hist),
+                
+                # Error content (either chart or message)
+                error_content,
+                
+                # Sample data table
+                html.Div([
+                    html.H6("Sample Data Points", className="mt-3"),
+                    values_table
+                ])
+            ])
 
-        error_plot_placeholder = dbc.Alert("Error distribution plot for selected range - Coming soon!", color="light", className="mt-3")
-        tab_specific_content = [fig_historical_content, error_plot_placeholder] # Graph and placeholder
+        # Replace the placeholder error plot with our new error panel
+        tab_specific_content = [fig_historical_content]
 
     return tab_specific_content, kpi_cards_content
+
+# Add callbacks for date preset buttons
+@app.callback(
+    [Output("date-picker-global", "start_date"),
+     Output("date-picker-global", "end_date")],
+    [Input("btn-last-24h", "n_clicks"),
+     Input("btn-last-7d", "n_clicks"),
+     Input("btn-last-30d", "n_clicks"),
+     Input("btn-all-time", "n_clicks")],
+    prevent_initial_call=True
+)
+def update_date_range(last_24h, last_7d, last_30d, all_time):
+    ctx = callback_context
+    if not ctx.triggered:
+        return no_update, no_update
+    
+    button_id = ctx.triggered[0]["prop_id"].split(".")[0]
+    today = pd.Timestamp.today().date()
+    
+    if button_id == "btn-last-24h":
+        return today - pd.Timedelta(days=1), today
+    elif button_id == "btn-last-7d":
+        return today - pd.Timedelta(days=7), today
+    elif button_id == "btn-last-30d":
+        return today - pd.Timedelta(days=30), today
+    elif button_id == "btn-all-time":
+        return min_d, max_d
+    
+    return no_update, no_update
 
 # ─── Run Server ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":

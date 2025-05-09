@@ -1,3 +1,50 @@
+html, body {font-family: 'Inter', 'Helvetica Neue', Arial, sans-serif !important;}
 
-    html, body {font-family: 'Inter', 'Helvetica Neue', Arial, sans-serif !important;}
+/* Global container styling */
+.card, .dbc-row-selectable, .dash-table-container {
+    border: 2px solid #2E7D32 !important;
+    border-radius: 8px !important;
+    padding: 12px !important;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1) !important;
+    margin-bottom: 16px !important;
+}
+
+/* Tab content styling */
+.tab-content {
+    border: 2px solid #2E7D32 !important;
+    border-top: none !important;
+    padding: 15px !important;
+    border-bottom-left-radius: 8px !important;
+    border-bottom-right-radius: 8px !important;
+}
+
+/* Tab styling */
+.nav-tabs {
+    border-bottom: 2px solid #2E7D32 !important;
+}
+
+.nav-tabs .nav-link.active {
+    border-color: #2E7D32 #2E7D32 #fff !important;
+    border-top-left-radius: 8px !important;
+    border-top-right-radius: 8px !important;
+    border-width: 2px !important;
+}
+
+/* Chart styling */
+.js-plotly-plot {
+    border-radius: 8px !important;
+    overflow: hidden !important;
+}
+
+/* Table styling */
+table.table {
+    border-radius: 8px !important;
+    overflow: hidden !important;
+}
+
+/* Dark mode gradient background */
+body.dark {
+    background: linear-gradient(to bottom, #102040, #000000) !important;
+    min-height: 100vh !important;
+}
     
