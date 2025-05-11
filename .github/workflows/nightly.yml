@@ -48,3 +48,7 @@ jobs:
             git commit -m "Nightly forecast update: $ts"
             git push
           fi
+      
+      - name: Trigger cloud deployment
+        run: curl -X POST https://api.render.com/deploy/srv-d0br1fruibrs73djkhq0?key=eEVwCUtdNBU
+
