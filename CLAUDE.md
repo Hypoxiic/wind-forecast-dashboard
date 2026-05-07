@@ -50,21 +50,22 @@ were ignored, so git keeps tracking them):
   [data/predictions/catboost_full.parquet](data/predictions/catboost_full.parquet)
 - [data/raw/](data/raw/) parquets including the training set
 - [metrics.json](metrics.json), [cv_metrics.json](cv_metrics.json)
-- [catboost_info/](catboost_info/) — training telemetry, should not be tracked
 
-**Gitignored:** `__pycache__/`, `.venv/`, `notebooks/`. NB: `.gitignore` is
-UTF-16 LE with a broken first line containing literal `\n` escapes, so the
-first three patterns are effectively dead. `__pycache__/` and `.venv/` are
-**not** actually ignored — fix before relying on them.
+**Gitignored** via `.gitignore` (now plain UTF-8 LF — old broken UTF-16 LE
+version is fixed): `__pycache__/`, `.venv/`, `notebooks/`,
+`catboost_info/`, `models/`, `data/`. The catboost_info/ directory was
+previously tracked; it is no longer.
 
 ## Run locally
 ```bash
 pip install -r requirements.txt
+# (or `pip install -e ".[dev]"` to also pull ruff/black/pre-commit/pytest)
 
-# Training (run once)
+# Training (run once). Defaults to GPU; set CATBOOST_DEVICE=CPU to retrain
+# without CUDA.
 python src/etl_training.py
 python src/featurise.py --mode training
-python src/train_model.py        # GPU-only — task_type="GPU" is hardcoded
+CATBOOST_DEVICE=CPU python src/train_model.py
 python src/validate.py
 
 # One nightly cycle
@@ -74,22 +75,29 @@ python -m src.pipeline
 python dashboard/app.py          # http://127.0.0.1:8050
 ```
 
+Optional dev tooling: `pre-commit install` enables ruff + black + hygiene
+hooks on commit. Configuration lives in [pyproject.toml](pyproject.toml).
+
 ## Render deploy contract
 - Web service, free tier. Build = `pip install -r requirements.txt`.
-- Start = `gunicorn dashboard.app:server --bind 0.0.0.0:$PORT`
-  (see [Procfile](Procfile)). No `--workers` / `--threads`, so 1 sync worker.
-- [Dockerfile](Dockerfile) is **not** the deploy path. Its `ENTRYPOINT` runs
-  `python src/pipeline.py`, which would deploy the wrong process. Treat as
-  orphaned.
+- Start = `gunicorn dashboard.app:server --bind 0.0.0.0:$PORT --workers 2
+  --threads 4 --preload --timeout 60` (see [Procfile](Procfile)).
+- [Dockerfile](Dockerfile) mirrors the Procfile and is suitable for Fly /
+  Cloud Run; Render itself still uses the Procfile.
 - Cold starts ~30s; the dashboard reads 5 parquet files at module import.
 
-## Nightly GitHub Action
-[.github/workflows/nightly.yml](.github/workflows/nightly.yml), 01:30 UTC:
-1. Runs `python -m src.pipeline`.
-2. Commits `data/predictions/latest.parquet` and
-   `data/features/history.parquet` as "Nightly forecast update: YYYY-MM-DD".
-3. Pings the Render deploy webhook to redeploy.
-NB: the Render deploy key is currently committed in plaintext on line 53.
+## CI workflows
+- [.github/workflows/ci.yml](.github/workflows/ci.yml) — runs on every push
+  and PR. Compiles all sources and imports `dashboard.app` to catch
+  syntax/import-time breakage. No lint enforcement yet (waiting on a
+  one-shot format pass).
+- [.github/workflows/nightly.yml](.github/workflows/nightly.yml) — 01:30
+  UTC daily. Runs `python -m src.pipeline`, commits the updated
+  `data/predictions/latest.parquet` and `data/features/history.parquet`
+  as "Nightly forecast update: YYYY-MM-DD", then triggers the Render
+  redeploy webhook **iff** the `RENDER_DEPLOY_HOOK_URL` repo secret is
+  set. Until it is, Render redeploys still happen via Render's own git
+  auto-deploy (if enabled) but not via the explicit hook ping.
 
 ## Working preferences
 - Commit and push in stages — one logical change per commit, push after each.
@@ -97,14 +105,19 @@ NB: the Render deploy key is currently committed in plaintext on line 53.
   small items in a row.
 
 ## Gotchas worth knowing
-- `wind_mw` is dead-code residue from before the target became `wind_perc`.
-  Still appears as drop-targets in [predict.py:17](src/predict.py#L17) and
-  exclusion lists in `train_model.py` / `validate.py`.
-- [cv_metrics.json](cv_metrics.json) reports trillion-scale MAPE for folds 2–4
-  because `wind_perc` approaches zero in calm periods and MAPE divides by it.
-  The mean MAPE is meaningless; trust per-fold RMSE instead.
-- The README roadmap item "error plot for Historical Analysis tab" is already
-  implemented at
+- The legacy `wind_mw` column is gone from the source tree but still
+  appears in old git blame. The current target is `wind_perc` everywhere.
+- [cv_metrics.json](cv_metrics.json) used to report trillion-scale MAPE
+  on folds 2–4 because the unbounded MAPE divides by near-zero
+  `wind_perc` during calm. `validate.py` now uses SMAPE instead. The
+  committed JSON has only the (always-correct) RMSE numbers until the
+  next manual `python src/validate.py` regenerates the SMAPE block.
+- The README roadmap item "error plot for Historical Analysis tab" is
+  already implemented at
   [dashboard/app.py:736-799](dashboard/app.py#L736-L799).
-- No tests, no pre-commit hooks, no PR CI. The nightly Action is the only
-  automation.
+- The Render deploy hook URL was previously committed in plaintext in
+  `nightly.yml`. The workflow now reads it from a repo secret, but the
+  old URL is still in git history forever — **rotate on Render** if it
+  hasn't been done already.
+- No automated tests yet. The CI workflow only does compile + import
+  checks. Item 12 of the improvement plan tracks the test backlog.
