@@ -6,9 +6,24 @@ import json
 import logging
 from pathlib import Path
 from sklearn.model_selection import TimeSeriesSplit
-from sklearn.metrics import mean_absolute_percentage_error, mean_squared_error
+from sklearn.metrics import mean_squared_error
 from catboost import CatBoostRegressor
 from collections import defaultdict
+
+
+def symmetric_mape(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """Symmetric MAPE, bounded in [0, 2]. Robust when actuals approach zero,
+    which the unbounded MAPE used previously was not — wind_perc dropping into
+    single-digit percentages during calm periods produced fold-level MAPE in
+    the trillions.
+    """
+    y_true = np.asarray(y_true, dtype=float)
+    y_pred = np.asarray(y_pred, dtype=float)
+    denom = np.abs(y_true) + np.abs(y_pred)
+    mask = denom > 0
+    if not mask.any():
+        return float("nan")
+    return float(np.mean(2.0 * np.abs(y_true[mask] - y_pred[mask]) / denom[mask]))
 
 # --- Configuration ---
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
@@ -80,11 +95,11 @@ for fold, (train_idx, val_idx) in enumerate(tscv.split(X)):
 
     # Evaluate on validation set
     y_pred = model.predict(X_val)
-    mape = mean_absolute_percentage_error(y_val, y_pred)
+    smape = symmetric_mape(y_val.to_numpy(), y_pred)
     rmse = mean_squared_error(y_val, y_pred) ** 0.5
 
-    logging.info(f"Fold {fold+1} MAPE (perc): {mape:.4f}, RMSE (perc): {rmse:.4f}")
-    fold_metrics["mape_perc"].append(mape)
+    logging.info(f"Fold {fold+1} SMAPE: {smape:.4f}, RMSE (perc): {rmse:.4f}")
+    fold_metrics["smape_perc"].append(smape)
     fold_metrics["rmse_perc"].append(rmse)
 
     # Store feature importance for this fold
@@ -92,23 +107,23 @@ for fold, (train_idx, val_idx) in enumerate(tscv.split(X)):
 
 # --- Aggregate Results ---
 logging.info("--- CV Results ---")
-mean_mape = np.mean(fold_metrics["mape_perc"])
-std_mape = np.std(fold_metrics["mape_perc"])
-mean_rmse = np.mean(fold_metrics["rmse_perc"])
-std_rmse = np.std(fold_metrics["rmse_perc"])
+mean_smape = float(np.mean(fold_metrics["smape_perc"]))
+std_smape = float(np.std(fold_metrics["smape_perc"]))
+mean_rmse = float(np.mean(fold_metrics["rmse_perc"]))
+std_rmse = float(np.std(fold_metrics["rmse_perc"]))
 
-logging.info(f"Mean MAPE (perc): {mean_mape:.4f} ± {std_mape:.4f}")
+logging.info(f"Mean SMAPE: {mean_smape:.4f} ± {std_smape:.4f}")
 logging.info(f"Mean RMSE (perc): {mean_rmse:.4f} ± {std_rmse:.4f}")
 
 cv_results = {
-    "mean_mape_perc": mean_mape,
-    "std_mape_perc": std_mape,
+    "mean_smape": mean_smape,
+    "std_smape": std_smape,
     "mean_rmse_perc": mean_rmse,
     "std_rmse_perc": std_rmse,
     "folds": {
-        "mape_perc": fold_metrics["mape_perc"],
-        "rmse_perc": fold_metrics["rmse_perc"]
-    }
+        "smape": fold_metrics["smape_perc"],
+        "rmse_perc": fold_metrics["rmse_perc"],
+    },
 }
 
 # --- Save CV Metrics ---
