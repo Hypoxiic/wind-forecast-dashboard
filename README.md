@@ -174,7 +174,7 @@ wind‑forecast‑dashboard/
 * [x] Nightly GitHub Action to refresh percentage predictions & history
 * [x] Two-tab dashboard structure (Forecast/Recent, Historical)
 * [x] Implement dynamic KPIs for Historical Analysis tab
-* [ ] Implement error plot for Historical Analysis tab
+* [x] Implement error plot for Historical Analysis tab
 * [ ] Pre‑commit lint/format hooks (ruff, black, isort)
 * [ ] Cloudfront (or Fly io) in front of Render for faster cold‑start
 
