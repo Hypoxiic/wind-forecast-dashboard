@@ -1,0 +1,76 @@
+[project]
+name = "wind-forecast-dashboard"
+version = "0.1.0"
+description = "Day-ahead forecast of GB wind generation as a percentage of the national mix, served via a Plotly Dash app."
+requires-python = ">=3.11"
+readme = "README.md"
+dependencies = [
+    "pandas>=2.0,<3.0",
+    "numpy>=1.20,<2.0",
+    "requests>=2.20,<3.0",
+    "pyarrow>=10.0,<17.0",
+    "holidays>=0.40,<1.0",
+    "scikit-learn>=1.0,<2.0",
+    "catboost>=1.0,<2.0",
+    "dash>=2.10,<3.0",
+    "plotly>=5.10,<6.0",
+    "dash-bootstrap-components>=1.6,<2.0",
+    "dash-bootstrap-templates>=1.1.0,<2.0",
+    "gunicorn",
+    "tenacity>=8.2",
+    "optuna>=3.0,<5.0",
+    "tqdm>=4.60",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.5,<1.0",
+    "black>=24.0",
+    "isort>=5.12",
+    "pre-commit>=3.0",
+    "pytest>=7.0",
+]
+
+# requirements.txt is kept in sync manually for now because Render's default
+# build command is `pip install -r requirements.txt`. Once the build command
+# is switched (e.g. to `pip install uv && uv pip install --system .`),
+# requirements.txt can be deleted.
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = [
+    "catboost_info",
+    "data",
+    "models",
+    "notebooks",
+]
+
+[tool.ruff.lint]
+# Conservative initial rule set: bugs and unused-import classes only. Tighten
+# (add "B", "UP", "SIM") after a one-shot format pass lands.
+select = ["E", "F", "W", "I"]
+ignore = [
+    "E501",  # line length is enforced by black
+    "E741",  # ambiguous variable name; tolerate for now
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["src", "dashboard"]
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+extend-exclude = '''
+/(
+  catboost_info
+  | data
+  | models
+  | notebooks
+)/
+'''
+
+[tool.isort]
+profile = "black"
+line_length = 100
+known_first_party = ["src", "dashboard"]
