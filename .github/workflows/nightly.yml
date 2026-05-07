@@ -50,5 +50,11 @@ jobs:
           fi
       
       - name: Trigger cloud deployment
-        run: curl -X POST https://api.render.com/deploy/srv-d0br1fruibrs73djkhq0?key=eEVwCUtdNBU
+        # Set RENDER_DEPLOY_HOOK_URL in repo Settings → Secrets and variables
+        # → Actions. Rotate the hook on Render first; the previous URL was
+        # committed in plaintext and is permanently exposed in git history.
+        if: ${{ env.RENDER_DEPLOY_HOOK_URL != '' }}
+        env:
+          RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+        run: curl -X POST -fsS "$RENDER_DEPLOY_HOOK_URL"
 
