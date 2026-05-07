@@ -100,8 +100,6 @@ NB: the Render deploy key is currently committed in plaintext on line 53.
 - `wind_mw` is dead-code residue from before the target became `wind_perc`.
   Still appears as drop-targets in [predict.py:17](src/predict.py#L17) and
   exclusion lists in `train_model.py` / `validate.py`.
-- [src/etl.py](src/etl.py) is dead — `pipeline.py` imports
-  `etl_inference as etl`. The name collision is confusing.
 - [cv_metrics.json](cv_metrics.json) reports trillion-scale MAPE for folds 2–4
   because `wind_perc` approaches zero in calm periods and MAPE divides by it.
   The mean MAPE is meaningless; trust per-fold RMSE instead.
