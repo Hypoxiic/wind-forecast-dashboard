@@ -61,15 +61,7 @@ df = pd.read_parquet(FEAT_PATH)
 df["datetime"] = pd.to_datetime(df["datetime"], utc=True)
 logging.info(f"Data shape: {df.shape}")
 
-# REMOVED Power‑curve proxies calculation (Moved to featurise.py)
-# RATED_MS = 15.0
-# df["wind_speed_v3"]      = df["wind_speed_10m"] ** 3
-# df["wind_speed_v3_clip"] = np.clip(df["wind_speed_10m"], 0, RATED_MS) ** 3
-
-# REMOVED Capacity‑factor target calculation
-# capacity_mw          = df["wind_mw"].max()
-
-TARGET        = "wind_perc"  # <-- CHANGED target
+TARGET        = "wind_perc"
 
 # Drop rows where the target variable is NaN before splitting X and y
 df.dropna(subset=[TARGET], inplace=True)
@@ -81,8 +73,7 @@ if df.empty:
     raise ValueError(f"DataFrame empty after dropping NaNs from target '{TARGET}'.")
 
 CAT_FEATURES  = ["is_holiday"]
-# <-- CHANGED features list to exclude wind_mw and the new target wind_perc
-FEATURES      = [c for c in df.columns if c not in {"datetime", "wind_mw", TARGET}]
+FEATURES      = [c for c in df.columns if c not in {"datetime", TARGET}]
 logging.info(f"Using {len(FEATURES)} features.")
 
 X = df[FEATURES]
@@ -236,12 +227,12 @@ logging.info(f"Training final GPU model on {X_train_full.shape[0]} samples …")
 model = CatBoostRegressor(**final_params)
 model.fit(Pool(X_train_full, y_train_full, cat_features=CAT_FEATURES))
 
-# -------- new: save predictions for the *entire* feature set --------
-full_pred_perc = model.predict(X)            # X == all data, RENAMED full_pred_cf
+# -------- save predictions for the *entire* feature set --------
+full_pred_perc = model.predict(X)
 
 pd.DataFrame({
     "datetime": df["datetime"],
-    "wind_perc_pred": full_pred_perc # <-- RENAMED column wind_mw_pred
+    "wind_perc_pred": full_pred_perc,
 }).to_parquet(
     MODELS_DIR / "catboost_full.parquet",
     index=False
@@ -251,8 +242,8 @@ pd.DataFrame({
 # ──────────────────────────
 # Evaluation & artefacts
 # ──────────────────────────
-pred_hold_perc = model.predict(X_holdout) # <-- RENAMED pred_hold_cf
-actual_hold_perc = y_holdout # <-- RENAMED actual_hold_mw to actual_hold_perc
+pred_hold_perc = model.predict(X_holdout)
+actual_hold_perc = y_holdout
 
 mse_final  = mean_squared_error(actual_hold_perc, pred_hold_perc)
 rmse_final = mse_final ** 0.5
@@ -260,14 +251,12 @@ mape_final = mean_absolute_percentage_error(actual_hold_perc, pred_hold_perc)
 
 # Metrics dict update
 metrics = {
-    "optuna_best_cv_rmse": study.best_value, # Note: Optuna RMSE is on the target scale (now percentage)
+    "optuna_best_cv_rmse": study.best_value,
     "holdout_rmse_perc": rmse_final,
     "holdout_mape_perc": mape_final,
-    # "capacity_mw_approx": capacity_mw, # <-- REMOVED capacity
     "best_params": best_params_optuna,
 }
 
-# Updated logging messages
 logging.info(f"Holdout RMSE (perc): {rmse_final:.4f}")
 logging.info(f"Holdout MAPE (perc): {mape_final:.4f}")
 
@@ -279,8 +268,8 @@ logging.info(f"Saved metrics → {METRICS_PATH}")
 # Save holdout predictions
 holdout_df = pd.DataFrame({
     "datetime": df["datetime"].iloc[-holdout_size:],
-    "wind_perc_actual": actual_hold_perc, # <-- RENAMED column wind_mw_actual
-    "wind_perc_pred": pred_hold_perc,   # <-- RENAMED column wind_mw_pred
+    "wind_perc_actual": actual_hold_perc,
+    "wind_perc_pred": pred_hold_perc,
 })
 holdout_df.to_parquet(
     MODELS_DIR / "catboost_holdout_gpu_final.parquet", index=False

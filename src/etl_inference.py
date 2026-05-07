@@ -5,9 +5,8 @@ Lean ETL for nightly inference using Carbon Intensity API:
 * Yesterday's weather             (Open‑Meteo archive, 1 day)
 * Next‑48 h weather forecast      (Open‑Meteo forecast endpoint)
 
-NOTE: Carbon Intensity API provides wind generation as a percentage ('perc')
-      of the total mix, not absolute MW. Downstream scripts (featurise, train)
-      expecting 'wind_mw' will need modification.
+The target everywhere downstream is wind_perc (% of national mix); see
+CLAUDE.md for context on the legacy MW-targeted variant.
 """
 
 from __future__ import annotations

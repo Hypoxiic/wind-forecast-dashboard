@@ -14,7 +14,7 @@ def main():
     preds = feats[["datetime"]].copy()
     
     # Prepare features for prediction
-    X = feats.drop(columns=["datetime", "wind_mw", "wind_perc"], errors='ignore')
+    X = feats.drop(columns=["datetime", "wind_perc"], errors='ignore')
     pool = Pool(X, cat_features=[]) # Explicitly define no categorical features
 
     preds["wind_perc_pred"] = model.predict(pool)

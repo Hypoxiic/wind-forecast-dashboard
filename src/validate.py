@@ -42,7 +42,7 @@ if df.empty:
     raise ValueError(f"DataFrame empty after dropping NaNs from target '{TARGET}'.")
 
 # Define features (X) and target (y)
-FEATURES = [col for col in df.columns if col not in ["datetime", "wind_mw", TARGET]]
+FEATURES = [col for col in df.columns if col not in ["datetime", TARGET]]
 X, y = df[FEATURES], df[TARGET]
 
 # --- Time Series Cross-Validation ---
