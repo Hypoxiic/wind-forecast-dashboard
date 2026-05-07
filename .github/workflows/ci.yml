@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          sudo apt-get update && sudo apt-get install -y libgomp1
+
+      - name: Compile-check all Python sources
+        run: python -m compileall -q src dashboard
+
+      - name: Import dashboard
+        # Catches schema drift between the committed parquets and dashboard/app.py
+        # at module-import time, which is when gunicorn first touches the app.
+        run: python -c "import dashboard.app as a; assert hasattr(a, 'server'), 'dashboard.app.server missing'"
+
+      - name: Import nightly pipeline modules
+        run: python -c "import src.pipeline, src.etl_inference, src.featurise, src.predict"
