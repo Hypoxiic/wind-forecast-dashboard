@@ -4,11 +4,16 @@ import pandas as pd
 import numpy as np
 import json
 import logging
+import os
 from pathlib import Path
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import mean_squared_error
 from catboost import CatBoostRegressor
 from collections import defaultdict
+
+DEVICE = os.environ.get("CATBOOST_DEVICE", "CPU").upper()
+if DEVICE not in ("GPU", "CPU"):
+    raise ValueError(f"CATBOOST_DEVICE must be 'GPU' or 'CPU', got {DEVICE!r}")
 
 
 def symmetric_mape(y_true: np.ndarray, y_pred: np.ndarray) -> float:
@@ -79,13 +84,16 @@ for fold, (train_idx, val_idx) in enumerate(tscv.split(X)):
     logging.info(f"Train size: {len(X_train)}, Validation size: {len(X_val)}")
 
     # Initialize and train CatBoost model with early stopping
-    model = CatBoostRegressor(
+    cat_kwargs = dict(
         random_state=42,
-        verbose=0, # Keep verbose low for CV loop
-        eval_metric='RMSE',
-        early_stopping_rounds=EARLY_STOPPING_ROUNDS
-        # task_type="GPU" # Uncomment if GPU available
+        verbose=0,
+        eval_metric="RMSE",
+        early_stopping_rounds=EARLY_STOPPING_ROUNDS,
+        task_type=DEVICE,
     )
+    if DEVICE == "GPU":
+        cat_kwargs["devices"] = "0"
+    model = CatBoostRegressor(**cat_kwargs)
 
     model.fit(
         X_train, y_train,

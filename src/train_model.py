@@ -1,18 +1,21 @@
 """
-Wind day‑ahead – Enhanced GPU Training Script
----------------------------------------------
-* Expanding‑window walk‑forward validation
-* GPU‑accelerated Optuna hyper‑parameter search
-* No column sampling (GPU limitation)
-* Power‑curve features (v³ and clipped v³)
-* Target = capacity factor → rescale back to MW
+Wind day-ahead training script.
+
+* Expanding-window walk-forward validation
+* Optuna hyper-parameter search
+* Power-curve features (v3 and clipped v3) computed in featurise.py
+* Target = wind_perc (% of GB mix)
 * Metrics & artefacts saved
+
+Device selection: defaults to GPU. Set CATBOOST_DEVICE=CPU to train on CPU
+(useful for contributors without CUDA, or for CI smoke tests).
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
 import warnings
 from pathlib import Path
 
@@ -25,17 +28,22 @@ from sklearn.model_selection import TimeSeriesSplit
 from tqdm.auto import tqdm
 
 # ──────────────────────────
-# Optional: GPU installation check
+# Device selection
 # ──────────────────────────
-try:
-    from catboost.dev_utils.installation_check import check_gpu_installation  # type: ignore
-    check_gpu_installation()
-    logging.info("CatBoost GPU installation check passed.")
-except Exception as e:
-    logging.warning(
-        f"CatBoost GPU check failed or tool unavailable: {e}. "
-        "Make sure your drivers / CUDA toolkit are OK."
-    )
+DEVICE = os.environ.get("CATBOOST_DEVICE", "GPU").upper()
+if DEVICE not in ("GPU", "CPU"):
+    raise ValueError(f"CATBOOST_DEVICE must be 'GPU' or 'CPU', got {DEVICE!r}")
+
+if DEVICE == "GPU":
+    try:
+        from catboost.dev_utils.installation_check import check_gpu_installation  # type: ignore
+        check_gpu_installation()
+        logging.info("CatBoost GPU installation check passed.")
+    except Exception as e:
+        logging.warning(
+            f"CatBoost GPU check failed or tool unavailable: {e}. "
+            "Make sure your drivers / CUDA toolkit are OK, or set CATBOOST_DEVICE=CPU."
+        )
 
 # ──────────────────────────
 # Config & logging
@@ -113,14 +121,14 @@ def objective(trial: optuna.Trial) -> float:
         "random_strength": trial.suggest_float("random_strength", 1e-8, 10.0, log=True),
         "border_count":    trial.suggest_int("border_count", 32, 255),
 
-        # Fixed for GPU regression
         "loss_function":  "RMSE",
         "eval_metric":    "RMSE",
-        "task_type":      "GPU",
-        "devices":        "0",
+        "task_type":      DEVICE,
         "random_state":   42,
         "verbose":        0,
     }
+    if DEVICE == "GPU":
+        params["devices"] = "0"
 
     # Remove subsample if Bayesian bootstrap (not supported)
     if bootstrap_type == "Bayesian":
@@ -171,7 +179,7 @@ def objective(trial: optuna.Trial) -> float:
 # Hyper‑parameter tuning
 # ──────────────────────────
 N_TRIALS = 100
-logging.info(f"Optuna study starts – {N_TRIALS} GPU trials with inner tqdm fold bars.")
+logging.info(f"Optuna study starts – {N_TRIALS} {DEVICE} trials with inner tqdm fold bars.")
 study = optuna.create_study(direction="minimize", study_name="wind_catboost_gpu_tuning")
 study.optimize(objective, n_trials=N_TRIALS, show_progress_bar=True)
 
@@ -204,14 +212,15 @@ if final_params.get("bootstrap_type") == "Bayesian":
 
 final_params.update(
     {
-        "loss_function": "RMSE", # Now RMSE of percentage
-        "eval_metric": "RMSE",   # Now RMSE of percentage
-        "task_type": "GPU",
-        "devices": "0",
+        "loss_function": "RMSE",
+        "eval_metric": "RMSE",
+        "task_type": DEVICE,
         "random_state": 42,
         "verbose": 200,
     }
 )
+if DEVICE == "GPU":
+    final_params["devices"] = "0"
 
 if "iterations" not in final_params:
     raise ValueError("'iterations' missing from best params – investigate Optuna output")
@@ -223,7 +232,7 @@ holdout_size = TEST_SIZE
 X_train_full, y_train_full = X.iloc[:-holdout_size], y.iloc[:-holdout_size]
 X_holdout, y_holdout       = X.iloc[-holdout_size:], y.iloc[-holdout_size:]
 
-logging.info(f"Training final GPU model on {X_train_full.shape[0]} samples …")
+logging.info(f"Training final {DEVICE} model on {X_train_full.shape[0]} samples …")
 model = CatBoostRegressor(**final_params)
 model.fit(Pool(X_train_full, y_train_full, cat_features=CAT_FEATURES))
 
@@ -281,4 +290,4 @@ model.save_model(str(MODEL_PATH))
 logging.info(f"Saved final model → {MODEL_PATH}")
 
 # Updated final log message
-logging.info("GPU training script finished - model, metrics & predictions saved.")
+logging.info(f"{DEVICE} training script finished - model, metrics & predictions saved.")
