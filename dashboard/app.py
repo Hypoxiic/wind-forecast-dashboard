@@ -319,7 +319,12 @@ app.layout = dbc.Container([
                           themes=[CSS_LIGHT, CSS_DARK],
                           switch_props={"style":{"marginTop":"6px"}})
         ], width=4, className="text-end d-flex align-items-center justify-content-end"),
-    ], align="center", className="mb-4 mt-2"),
+    ], align="center", className="mb-2 mt-2"),
+
+    html.Div([
+        html.Span("Data updated: ", className="text-secondary small"),
+        html.Span(data_last_updated(), className="small fw-semibold"),
+    ], className="mb-3"),
 
     staleness_banner(),
 
@@ -341,9 +346,6 @@ app.layout = dbc.Container([
         )
     ]), className="mb-4 wf-panel"),
 
-    # Add date preset buttons
-    create_date_preset_buttons(),
-    
     # Combine tabs and series selector in one row
     dbc.Row([
         dbc.Col([
@@ -357,21 +359,24 @@ app.layout = dbc.Container([
             html.Div(series_dd, style={"display": "inline-block", "vertical-align": "middle"}),
         ], width=4, className="text-end"),
     ], className="align-items-center mb-3"),
-    
-    # Move date range selector to a more intuitive design
-    dbc.Card([
-        dbc.CardBody([
+
+    # The date presets + range picker only drive the Historical Analysis
+    # chart. A callback hides this whole block on the Forecast tab, where the
+    # chart is a fixed "recent + forecast horizon" window — otherwise the
+    # controls change but the chart doesn't, which looks broken.
+    html.Div(id="date-controls", children=[
+        create_date_preset_buttons(),
+        dbc.Card(dbc.CardBody(
             dbc.Row([
-                dbc.Col(html.Label("Date Range:", className="pt-2"), width="auto"),
-                dbc.Col(date_picker_global, width=4),
-                dbc.Col(html.Div([
-                    html.Span("Last updated: ", className="text-secondary"),
-                    html.Span(data_last_updated(), className="fw-semibold")
-                ]), width=4, className="text-end")
+                dbc.Col(html.Label("Date Range:", className="pt-2 mb-0"), width="auto"),
+                dbc.Col(date_picker_global, width="auto"),
+                dbc.Col(html.Span("Filters the Historical Analysis chart below.",
+                                  className="text-secondary small"),
+                        className="text-end"),
             ], align="center")
-        ])
-    ], className="mb-4 wf-panel"),
-    
+        ), className="mb-4 wf-panel"),
+    ]),
+
     html.Div(id="tab-content"),
 
     dcc.Download(id="download-data"),
@@ -849,6 +854,17 @@ def render_content(theme_switch_on, active_tab, series_sel, start_d_global, end_
         tab_specific_content = [fig_historical_content]
 
     return tab_specific_content, kpi_cards_content
+
+# Show the date controls only on the Historical Analysis tab. The Forecast
+# tab shows a fixed recent+forecast window, so the presets/picker there would
+# change value but never move the chart — which reads as "the buttons are
+# broken". Hiding them removes that trap.
+@app.callback(
+    Output("date-controls", "style"),
+    Input("tabs", "active_tab"),
+)
+def toggle_date_controls(active_tab):
+    return {} if active_tab == "historical" else {"display": "none"}
 
 # Add callbacks for date preset buttons
 @app.callback(

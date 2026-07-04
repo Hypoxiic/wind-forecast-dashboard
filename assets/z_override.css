@@ -69,17 +69,27 @@ html, body {
     font-variant-numeric: tabular-nums;
 }
 
-/* Tabs: quiet, with an accent underline on the active tab */
+/* Tabs: quiet, with an accent underline on the active tab. Inactive tabs
+   still read as clickable (full body colour dimmed, pointer, hover underline)
+   — too-subtle tabs get mistaken for plain labels. */
 .nav-tabs { border-bottom: 1px solid var(--bs-border-color); }
 .nav-tabs .nav-link {
     border: none;
-    color: var(--bs-secondary-color);
+    border-bottom: 2px solid transparent;
+    color: var(--bs-body-color);
+    opacity: 0.6;
     font-weight: 600;
-    padding: 0.5rem 1rem;
+    padding: 0.5rem 1.1rem;
+    cursor: pointer;
 }
-.nav-tabs .nav-link:hover { color: var(--bs-body-color); }
+.nav-tabs .nav-link:hover {
+    opacity: 1;
+    color: var(--bs-body-color);
+    border-bottom-color: var(--bs-border-color);
+}
 .nav-tabs .nav-link.active {
     color: var(--bs-body-color);   /* --bs-emphasis-color is black in CYBORG → invisible on dark */
+    opacity: 1;
     background: transparent;
     border-bottom: 2px solid var(--wf-good);
     font-weight: 700;
