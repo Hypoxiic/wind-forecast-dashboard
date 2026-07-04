@@ -84,13 +84,55 @@ def fmt_metric(val, fmt: str = "{:.2f}") -> str:
     """Format a metric for display, showing N/A instead of literal 'nan'."""
     return fmt.format(val) if not np.isnan(val) else "N/A"
 
+def smape(y_true, y_pred) -> float:
+    """Symmetric MAPE as a 0–2 fraction. Plain MAPE divides by wind_perc,
+    which is near-zero on calm hours and explodes to trillions of %; SMAPE is
+    bounded and is what validate.py already uses for the CV metrics."""
+    y_true = np.asarray(y_true, dtype=float)
+    y_pred = np.asarray(y_pred, dtype=float)
+    denom = np.abs(y_true) + np.abs(y_pred)
+    mask = denom > 0
+    if not mask.any():
+        return np.nan
+    return float(np.mean(2.0 * np.abs(y_true[mask] - y_pred[mask]) / denom[mask]))
+
+def latest_actual_ts():
+    """Timestamp of the most recent actual observation, or None. Defined
+    before hist_df loads; resolves hist_df from module globals at call time."""
+    try:
+        actuals = hist_df.dropna(subset=["wind_perc"])
+        if not actuals.empty:
+            return actuals["datetime"].max()
+    except Exception:
+        pass
+    return None
+
 def data_last_updated() -> str:
-    """Freshness stamp derived from the data files themselves, not from the
-    render time — a failed nightly run must not masquerade as fresh data."""
+    """Freshness stamp = latest actual observation, not the file mtime. A file
+    can look freshly written (a redeploy) while its data is weeks stale; the
+    latest observation is the honest 'data current as of' signal."""
+    ts = latest_actual_ts()
+    if ts is not None and pd.notna(ts):
+        return ts.strftime("%Y-%m-%d %H:%M UTC")
     mtimes = [p.stat().st_mtime for p in (LATEST_PRED_PATH, HISTORY_PATH) if p.exists()]
     if not mtimes:
         return "unknown"
     return pd.Timestamp(max(mtimes), unit="s", tz="UTC").strftime("%Y-%m-%d %H:%M UTC")
+
+def staleness_banner():
+    """A warning strip when the latest actual observation is well in the past —
+    surfaces a stalled nightly pipeline instead of silently showing old data."""
+    ts = latest_actual_ts()
+    if ts is None or pd.isna(ts):
+        return None
+    age_days = (pd.Timestamp.now(tz="UTC") - ts).days
+    if age_days < 2:
+        return None
+    return dbc.Alert(
+        f"Data may be stale — the latest actual observation is {age_days} days old "
+        f"({ts.strftime('%Y-%m-%d %H:%M UTC')}). The nightly update may not have run.",
+        color="warning", className="mb-3 py-2 small", dismissable=True,
+    )
 
 # ─── Load Metrics ────────────────────────────────────────────────────────────
 raw_metrics = safe_json(METRICS_PATH)
@@ -192,25 +234,24 @@ def delta_colour(val, base, lower_better=True):
     return "warning", "="
 
 def make_card(title, value, unit, colour, tooltip=None):
+    # `colour` encodes model-vs-baseline quality (success/danger/warning) or a
+    # neutral card (light/secondary). Rather than a loud fully-saturated card
+    # background, render a clean neutral metric card and tint only the value.
     cid = str(uuid.uuid4())
-    body = dbc.CardBody(html.H4(f"{value}{unit}", className="card-title"))
-    
-    # Custom styles for the card
-    card_style = {"height":"100px", "padding": "12px", "border-radius": "8px", "box-shadow": "0 2px 4px rgba(0,0,0,0.1)"}
-    
-    # Add green border for all cards except metric cards (baseline and model)
-    if not (title.startswith("Baseline") or title.startswith("Model")):
-        card_style["border"] = "2px solid #2E7D32"
-    else:
-        card_style["border"] = "none"  # Remove border for metric cards
-    
-    # Revert back to standard colors for cards, but keep the borders consistent
-    inverse = (colour not in ["light", "secondary"])
-    
-    card = dbc.Card([dbc.CardHeader(title), body],
-                    id=cid, color=colour,
-                    inverse=inverse,
-                    className="shadow-sm", style=card_style)
+    accent = {
+        "success": "var(--wf-good)",
+        "danger":  "var(--wf-bad)",
+        "warning": "var(--wf-warn)",
+    }.get(colour)  # None → inherit body colour for neutral cards
+
+    value_style = {"color": accent} if accent else {}
+    card = dbc.Card(
+        dbc.CardBody([
+            html.Div(title, className="wf-metric-label"),
+            html.Div(f"{value}{unit}", className="wf-metric-value", style=value_style),
+        ]),
+        id=cid, className="wf-metric-card h-100",
+    )
     if tooltip:
         return dbc.Col([card, dbc.Tooltip(tooltip, target=cid, placement="top")])
     return dbc.Col(card)
@@ -220,8 +261,12 @@ load_figure_template(THEME_LIGHT)
 # suppress_callback_exceptions: the per-tab export buttons are created
 # dynamically inside tab content, so their callback targets aren't in the
 # initial layout.
+# assets_folder: the stylesheet lives in the repo-root assets/, but Dash
+# defaults to dashboard/assets/ (next to this file), so the custom CSS was
+# never actually served. Point it at the real folder.
 app    = Dash(__name__, external_stylesheets=[CSS_LIGHT],
-              suppress_callback_exceptions=True)
+              suppress_callback_exceptions=True,
+              assets_folder=str(ROOT / "assets"))
 server = app.server
 app.title = "GB Wind Day-Ahead Forecast"
 
@@ -262,16 +307,23 @@ def create_date_preset_buttons():
 
 app.layout = dbc.Container([
     dbc.Row([
-        dbc.Col(html.H2("GB Wind Day-Ahead Forecast", className="display-6"), width=8),
         dbc.Col([
-            dbc.Button("Export Data", id="btn-export-main", color="secondary", size="sm", className="me-2"),
+            html.H2("GB Wind Day-Ahead Forecast", className="wf-title mb-0"),
+            html.Div("Day-ahead % of GB generation from wind · CatBoost vs 48h-persistence baseline",
+                     className="text-secondary small mt-1"),
+        ], width=8),
+        dbc.Col([
+            dbc.Button([html.I(className="bi"), "Export Data"], id="btn-export-main",
+                       color="success", outline=True, size="sm", className="me-3"),
             ThemeSwitchAIO(aio_id="theme",
                           themes=[CSS_LIGHT, CSS_DARK],
-                          switch_props={"style":{"marginTop":"12px"}})
-        ], width=4, className="text-end"),
-    ], align="center", className="mb-3"),
-    
-    html.Div(id="kpi-cards-row"), 
+                          switch_props={"style":{"marginTop":"6px"}})
+        ], width=4, className="text-end d-flex align-items-center justify-content-end"),
+    ], align="center", className="mb-4 mt-2"),
+
+    staleness_banner(),
+
+    html.Div(id="kpi-cards-row"),
 
     dbc.Card(dbc.CardBody([
         html.P(
@@ -283,11 +335,11 @@ app.layout = dbc.Container([
           className="mb-2"
         ),
         html.P(
-          f"Hold-out (last 48 h) error from training: RMSE ≈ {fmt_metric(cat_rmse)}% • "
+          f"Hold-out (last 48 h) error from training: RMSE ≈ {fmt_metric(cat_rmse)} %-points • "
           f"MAPE ≈ {fmt_metric(cat_mape * 100, '{:.1f}')}%.",
-          className="fst-italic small mb-0"
+          className="fst-italic small mb-0 text-secondary"
         )
-    ]), className="mb-4 border-0 shadow-sm", style={"border": "2px solid #2E7D32", "padding": "12px", "border-radius": "8px", "box-shadow": "0 2px 4px rgba(0,0,0,0.1)"}),
+    ]), className="mb-4 wf-panel"),
 
     # Add date preset buttons
     create_date_preset_buttons(),
@@ -313,12 +365,12 @@ app.layout = dbc.Container([
                 dbc.Col(html.Label("Date Range:", className="pt-2"), width="auto"),
                 dbc.Col(date_picker_global, width=4),
                 dbc.Col(html.Div([
-                    html.Span("Last updated: ", className="text-muted"),
-                    html.Span(data_last_updated())
+                    html.Span("Last updated: ", className="text-secondary"),
+                    html.Span(data_last_updated(), className="fw-semibold")
                 ]), width=4, className="text-end")
             ], align="center")
         ])
-    ], className="mb-4", style={"border": "2px solid #2E7D32", "padding": "12px", "border-radius": "8px", "box-shadow": "0 2px 4px rgba(0,0,0,0.1)"}),
+    ], className="mb-4 wf-panel"),
     
     html.Div(id="tab-content"),
 
@@ -336,10 +388,13 @@ app.layout = dbc.Container([
      Input("date-picker-global", "start_date"),
      Input("date-picker-global", "end_date")]
 )
-def render_content(is_dark, active_tab, series_sel, start_d_global, end_d_global):
+def render_content(theme_switch_on, active_tab, series_sel, start_d_global, end_d_global):
     dash_logger.info(f"--- render_content CALLED: active_tab={active_tab}, series_sel={series_sel}, start_d={start_d_global}, end_d={end_d_global} ---")
-    template = THEME_DARK if is_dark else THEME_LIGHT
-    light_bg = not is_dark
+    # ThemeSwitchAIO semantics: switch ON (True) selects themes[0], which is
+    # the LIGHT stylesheet here. Treating True as dark inverted every figure
+    # template against the page CSS (white charts on the dark theme).
+    light_bg = bool(theme_switch_on)
+    template = THEME_LIGHT if light_bg else THEME_DARK
     kpi_cards_content = []
     tab_specific_content = []
 
@@ -354,10 +409,16 @@ def render_content(is_dark, active_tab, series_sel, start_d_global, end_d_global
         kpi_cards_content = [dbc.Row([card_baseline_rmse_fc, card_baseline_mape_fc, card_cat_rmse_fc, card_cat_mape_fc], className="g-4 mb-4")]
 
         # --- Content for Forecast & Recent Tab ---
-        # Define date range for this tab: e.g., last 3 days of history + 2 days of forecast
-        current_date = date.today() # Use imported date
-        forecast_plot_start_date = current_date - pd.Timedelta(days=3) # Show last 3 days of history
-        forecast_plot_end_date = current_date + pd.Timedelta(days=2)   # Show 2 days of forecast
+        # Anchor the window to the newest data point, not date.today(): when
+        # the nightly job lags, today's [-3d,+2d] window has no data and the
+        # tab goes blank. Anchoring to the latest available timestamp always
+        # shows the most recent history + forecast horizon that exists.
+        if not plot_data.empty and not plot_data["datetime"].dropna().empty:
+            anchor_date = plot_data["datetime"].dropna().dt.date.max()
+        else:
+            anchor_date = date.today()
+        forecast_plot_start_date = anchor_date - pd.Timedelta(days=5)
+        forecast_plot_end_date = anchor_date
 
         df_forecast_tab = plot_data[
             (plot_data.datetime.dt.date >= forecast_plot_start_date) &
@@ -416,41 +477,16 @@ def render_content(is_dark, active_tab, series_sel, start_d_global, end_d_global
             
             # Layout enhancements
             fig_fc.update_layout(
-                margin={"t":30,"b":30,"l":30,"r":30}, 
-                title_text="Forecast & Recent Data (Last 3 Days History + 2 Days Forecast)", 
-                title_x=0.5
+                margin={"t":48,"b":30,"l":30,"r":30},
+                title_text="Forecast &amp; Recent Data",
+                title_x=0.5,
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                hovermode="x unified",
             )
             
-            # Add dark mode gradient overlay if in dark mode
-            if not light_bg:
-                fig_fc.update_layout(
-                    paper_bgcolor="rgb(13,18,30)",
-                    plot_bgcolor="rgb(13,18,30)",
-                    # Improve grid visibility for better readability
-                    xaxis=dict(
-                        gridcolor="rgba(255, 255, 255, 0.1)",
-                        zerolinecolor="rgba(255, 255, 255, 0.1)"
-                    ),
-                    yaxis=dict(
-                        gridcolor="rgba(255, 255, 255, 0.1)",
-                        zerolinecolor="rgba(255, 255, 255, 0.1)"
-                    )
-                )
-            else:
-                fig_fc.update_layout(
-                    paper_bgcolor="white", 
-                    plot_bgcolor="white",
-                    # Improve grid visibility for better readability
-                    xaxis=dict(
-                        gridcolor="rgba(0, 0, 0, 0.1)",
-                        zerolinecolor="rgba(0, 0, 0, 0.1)"
-                    ),
-                    yaxis=dict(
-                        gridcolor="rgba(0, 0, 0, 0.1)",
-                        zerolinecolor="rgba(0, 0, 0, 0.1)"
-                    )
-                )
-                
+            # Backgrounds and gridlines come from the plotly template
+            # (simple_white / plotly_dark); manual paper_bgcolor overrides
+            # fought the template and broke dark mode.
             dash_logger.info(f"Forecast tab: Plotting {len(df_forecast_tab)} rows.")
             
             # Create error panel showing difference between prediction and actual
@@ -580,23 +616,8 @@ def render_content(is_dark, active_tab, series_sel, start_d_global, end_d_global
                 trend_indicator = None
             
             fig_forecast_content = html.Div([
-                # Add last updated timestamp
-                html.Div([
-                    html.Span("Last updated: ", className="text-muted"),
-                    html.Span(data_last_updated())
-                ], className="mb-3 text-end"),
-                
-                # Main chart with export button
-                html.Div([
-                    dbc.Button(
-                        "Export Data", 
-                        color="secondary", 
-                        size="sm", 
-                        className="mb-2 float-end",
-                        id="btn-export-data"
-                    ),
-                    dcc.Graph(figure=fig_fc),
-                ]),
+                # Main chart
+                dcc.Graph(figure=fig_fc),
                 
                 # Error chart
                 error_chart,
@@ -631,26 +652,28 @@ def render_content(is_dark, active_tab, series_sel, start_d_global, end_d_global
         dyn_cat_rmse, dyn_cat_mape = np.nan, np.nan
         dyn_baseline_rmse, dyn_baseline_mape = np.nan, np.nan
 
-        # CatBoost model dynamic metrics
+        # CatBoost model dynamic metrics. Use SMAPE, not MAPE: over a wide
+        # selected range MAPE divides by near-zero calm-hour wind_perc and
+        # renders "232531363538823.2%".
         df_eval_model = df_hist_tab.dropna(subset=["wind_perc", "wind_perc_pred"])
         if len(df_eval_model) > 1:
             dyn_cat_rmse = np.sqrt(mean_squared_error(df_eval_model.wind_perc, df_eval_model.wind_perc_pred))
-            dyn_cat_mape = mean_absolute_percentage_error(df_eval_model.wind_perc, df_eval_model.wind_perc_pred)
+            dyn_cat_mape = smape(df_eval_model.wind_perc, df_eval_model.wind_perc_pred)
 
         # Baseline dynamic metrics
         df_eval_baseline = df_hist_tab.dropna(subset=["wind_perc", "wind_perc_lag_48h"])
         if len(df_eval_baseline) > 1:
             dyn_baseline_rmse = np.sqrt(mean_squared_error(df_eval_baseline.wind_perc, df_eval_baseline.wind_perc_lag_48h))
-            dyn_baseline_mape = mean_absolute_percentage_error(df_eval_baseline.wind_perc, df_eval_baseline.wind_perc_lag_48h)
+            dyn_baseline_mape = smape(df_eval_baseline.wind_perc, df_eval_baseline.wind_perc_lag_48h)
         
         # --- KPI Cards for Historical Analysis Tab (Dynamic) ---
         dyn_cat_rmse_col, dyn_cat_rmse_ic = delta_colour(dyn_cat_rmse, dyn_baseline_rmse)
         dyn_cat_mape_col, dyn_cat_mape_ic = delta_colour(dyn_cat_mape, dyn_baseline_mape)
 
         card_dyn_baseline_rmse = make_card("Baseline RMSE (Selected Range)", f"{dyn_baseline_rmse:.2f}" if not np.isnan(dyn_baseline_rmse) else "N/A", "%", "light")
-        card_dyn_baseline_mape = make_card("Baseline MAPE (Selected Range)", f"{dyn_baseline_mape*100:.1f}" if not np.isnan(dyn_baseline_mape) else "N/A", "%", "light")
+        card_dyn_baseline_mape = make_card("Baseline SMAPE (Selected Range)", f"{dyn_baseline_mape*100:.1f}" if not np.isnan(dyn_baseline_mape) else "N/A", "%", "light")
         card_dyn_cat_rmse = make_card("Model RMSE (Selected Range)", f"{dyn_cat_rmse:.2f}" if not np.isnan(dyn_cat_rmse) else "N/A", f"% {dyn_cat_rmse_ic}", dyn_cat_rmse_col, tooltip=f"Model vs Baseline Δ {(dyn_cat_rmse-dyn_baseline_rmse)/dyn_baseline_rmse:+.0%}" if not (np.isnan(dyn_cat_rmse) or np.isnan(dyn_baseline_rmse)) else "N/A")
-        card_dyn_cat_mape = make_card("Model MAPE (Selected Range)", f"{dyn_cat_mape*100:.1f}" if not np.isnan(dyn_cat_mape) else "N/A", f"% {dyn_cat_mape_ic}", dyn_cat_mape_col, tooltip=f"Model vs Baseline Δ {(dyn_cat_mape-dyn_baseline_mape)/dyn_baseline_mape:+.1%}" if not (np.isnan(dyn_cat_mape) or np.isnan(dyn_baseline_mape)) else "N/A")
+        card_dyn_cat_mape = make_card("Model SMAPE (Selected Range)", f"{dyn_cat_mape*100:.1f}" if not np.isnan(dyn_cat_mape) else "N/A", f"% {dyn_cat_mape_ic}", dyn_cat_mape_col, tooltip=f"Model vs Baseline Δ {(dyn_cat_mape-dyn_baseline_mape)/dyn_baseline_mape:+.1%}" if not (np.isnan(dyn_cat_mape) or np.isnan(dyn_baseline_mape)) else "N/A")
         kpi_cards_content = [dbc.Row([card_dyn_baseline_rmse, card_dyn_baseline_mape, card_dyn_cat_rmse, card_dyn_cat_mape], className="g-4 mb-4")]
         
         # --- Content for Historical Analysis Tab (Plot) ---
@@ -708,41 +731,16 @@ def render_content(is_dark, active_tab, series_sel, start_d_global, end_d_global
             
             # Layout enhancements
             fig_hist.update_layout(
-                margin={"t":30,"b":30,"l":30,"r":30}, 
-                title_text="Historical Data Analysis", 
-                title_x=0.5
+                margin={"t":48,"b":30,"l":30,"r":30},
+                title_text="Historical Data Analysis",
+                title_x=0.5,
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                hovermode="x unified",
             )
             
-            # Add dark mode gradient overlay if in dark mode
-            if not light_bg:
-                fig_hist.update_layout(
-                    paper_bgcolor="rgb(13,18,30)",
-                    plot_bgcolor="rgb(13,18,30)",
-                    # Improve grid visibility for better readability
-                    xaxis=dict(
-                        gridcolor="rgba(255, 255, 255, 0.1)",
-                        zerolinecolor="rgba(255, 255, 255, 0.1)"
-                    ),
-                    yaxis=dict(
-                        gridcolor="rgba(255, 255, 255, 0.1)",
-                        zerolinecolor="rgba(255, 255, 255, 0.1)"
-                    )
-                )
-            else:
-                fig_hist.update_layout(
-                    paper_bgcolor="white", 
-                    plot_bgcolor="white",
-                    # Improve grid visibility for better readability
-                    xaxis=dict(
-                        gridcolor="rgba(0, 0, 0, 0.1)",
-                        zerolinecolor="rgba(0, 0, 0, 0.1)"
-                    ),
-                    yaxis=dict(
-                        gridcolor="rgba(0, 0, 0, 0.1)",
-                        zerolinecolor="rgba(0, 0, 0, 0.1)"
-                    )
-                )
-                
+            # Backgrounds and gridlines come from the plotly template
+            # (simple_white / plotly_dark); manual overrides broke dark mode.
+
             # Create error panel showing difference between prediction and actual
             error_df = df_hist_tab.copy()
             error_df["prediction_error"] = error_df["wind_perc_pred"] - error_df["wind_perc"]
@@ -834,19 +832,6 @@ def render_content(is_dark, active_tab, series_sel, start_d_global, end_d_global
             
             # Main page content
             fig_historical_content = html.Div([
-                # Add last updated timestamp and export button
-                html.Div([
-                    html.Span("Last updated: ", className="text-muted"),
-                    html.Span(data_last_updated()),
-                    dbc.Button(
-                        "Export Data", 
-                        color="secondary", 
-                        size="sm", 
-                        className="float-end",
-                        id="btn-export-hist-data"
-                    ),
-                ], className="mb-3 d-flex justify-content-between"),
-                
                 # Main chart
                 dcc.Graph(figure=fig_hist),
                 
@@ -896,20 +881,17 @@ def update_date_range(last_24h, last_7d, last_30d, all_time):
 
     return no_update, no_update
 
-# Export the currently selected date range as CSV. All three Export buttons
-# share this callback; the in-tab ones are created dynamically, hence
-# suppress_callback_exceptions on the app.
+# Export the currently selected date range as CSV. One global button
+# (always in the layout) drives this, so no suppressed-callback juggling.
 @app.callback(
     Output("download-data", "data"),
-    [Input("btn-export-main", "n_clicks"),
-     Input("btn-export-data", "n_clicks"),
-     Input("btn-export-hist-data", "n_clicks")],
+    Input("btn-export-main", "n_clicks"),
     [State("date-picker-global", "start_date"),
      State("date-picker-global", "end_date")],
     prevent_initial_call=True,
 )
-def export_data(n_main, n_tab, n_hist, start_d, end_d):
-    if not callback_context.triggered or not any(n for n in (n_main, n_tab, n_hist) if n):
+def export_data(n_main, start_d, end_d):
+    if not n_main:
         return no_update
     df = plot_data
     if start_d and end_d:

@@ -1,50 +1,96 @@
-html, body {font-family: 'Inter', 'Helvetica Neue', Arial, sans-serif !important;}
+/*  assets/z_override.css
+    ------------------------------------------------------------------
+    Restrained, modern styling for the GB Wind dashboard.
+    Colours are pulled from Bootstrap 5.3 theme variables (--bs-*) so
+    they adapt automatically when ThemeSwitchAIO swaps MINTY <-> CYBORG,
+    instead of the old hard-coded 2px green borders on everything.
+*/
 
-/* Global container styling */
-.card, .dbc-row-selectable, .dash-table-container {
-    border: 2px solid #2E7D32 !important;
-    border-radius: 8px !important;
-    padding: 12px !important;
-    box-shadow: 0 2px 4px rgba(0,0,0,0.1) !important;
-    margin-bottom: 16px !important;
+:root {
+    --wf-good: #10b981;   /* emerald — model better than baseline */
+    --wf-bad:  #ef4444;   /* red     — model worse                */
+    --wf-warn: #f59e0b;   /* amber   — tie / caution              */
+    --wf-radius: 12px;
+    --wf-shadow: 0 1px 2px rgba(15, 23, 42, 0.04),
+                 0 4px 14px rgba(15, 23, 42, 0.06);
+    --wf-shadow-hover: 0 8px 24px rgba(15, 23, 42, 0.12);
 }
 
-/* Tab content styling */
-.tab-content {
-    border: 2px solid #2E7D32 !important;
-    border-top: none !important;
-    padding: 15px !important;
-    border-bottom-left-radius: 8px !important;
-    border-bottom-right-radius: 8px !important;
+html, body {
+    font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
 }
 
-/* Tab styling */
-.nav-tabs {
-    border-bottom: 2px solid #2E7D32 !important;
+/* Header */
+.wf-title {
+    font-weight: 700;
+    letter-spacing: -0.02em;
 }
 
+/* Generic cards / panels: soft, themed, no loud borders */
+.card,
+.wf-panel {
+    border: 1px solid var(--bs-border-color) !important;
+    border-radius: var(--wf-radius) !important;
+    box-shadow: var(--wf-shadow) !important;
+}
+
+.wf-panel .card-body,
+.wf-panel > .card-body { padding: 16px 18px; }
+
+/* KPI / metric cards */
+.wf-metric-card {
+    border: 1px solid var(--bs-border-color) !important;
+    border-radius: var(--wf-radius) !important;
+    box-shadow: var(--wf-shadow) !important;
+    background: var(--bs-body-bg);
+    transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+.wf-metric-card:hover {
+    transform: translateY(-2px);
+    box-shadow: var(--wf-shadow-hover) !important;
+}
+.wf-metric-card .card-body { padding: 14px 16px; }
+
+.wf-metric-label {
+    font-size: 0.72rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--bs-secondary-color);
+    margin-bottom: 6px;
+    line-height: 1.25;
+    min-height: 2.4em;
+}
+.wf-metric-value {
+    font-size: 1.7rem;
+    font-weight: 700;
+    line-height: 1.1;
+    font-variant-numeric: tabular-nums;
+}
+
+/* Tabs: quiet, with an accent underline on the active tab */
+.nav-tabs { border-bottom: 1px solid var(--bs-border-color); }
+.nav-tabs .nav-link {
+    border: none;
+    color: var(--bs-secondary-color);
+    font-weight: 600;
+    padding: 0.5rem 1rem;
+}
+.nav-tabs .nav-link:hover { color: var(--bs-body-color); }
 .nav-tabs .nav-link.active {
-    border-color: #2E7D32 #2E7D32 #fff !important;
-    border-top-left-radius: 8px !important;
-    border-top-right-radius: 8px !important;
-    border-width: 2px !important;
+    color: var(--bs-body-color);   /* --bs-emphasis-color is black in CYBORG → invisible on dark */
+    background: transparent;
+    border-bottom: 2px solid var(--wf-good);
+    font-weight: 700;
 }
 
-/* Chart styling */
-.js-plotly-plot {
-    border-radius: 8px !important;
-    overflow: hidden !important;
-}
+/* Charts sit flush inside rounded cards */
+.js-plotly-plot { border-radius: var(--wf-radius); overflow: hidden; }
 
-/* Table styling */
-table.table {
-    border-radius: 8px !important;
-    overflow: hidden !important;
-}
+/* Tables inherit the theme background rather than forcing white */
+.table { --bs-table-bg: transparent; }
+.dash-table-container { border-radius: var(--wf-radius); overflow: hidden; }
 
-/* Dark mode gradient background */
-body.dark {
-    background: linear-gradient(to bottom, #102040, #000000) !important;
-    min-height: 100vh !important;
-}
-    
+/* Dropdown: match rounded language */
+.Select-control, .is-searchable { border-radius: 8px !important; }
