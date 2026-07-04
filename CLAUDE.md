@@ -94,12 +94,13 @@ hooks on commit. Configuration lives in [pyproject.toml](pyproject.toml).
   syntax/import-time breakage. No lint enforcement yet (waiting on a
   one-shot format pass).
 - [.github/workflows/nightly.yml](.github/workflows/nightly.yml) — 01:30
-  UTC daily. Runs `python -m src.pipeline`, commits the updated
-  `data/predictions/latest.parquet` and `data/features/history.parquet`
-  as "Nightly forecast update: YYYY-MM-DD", then triggers the Render
-  redeploy webhook **iff** the `RENDER_DEPLOY_HOOK_URL` repo secret is
-  set. Until it is, Render redeploys still happen via Render's own git
-  auto-deploy (if enabled) but not via the explicit hook ping.
+  UTC daily. Runs `python -m src.pipeline`, commits every tracked file
+  the pipeline rewrites (`latest.parquet`, `history.parquet`,
+  `for_predict.parquet`, the raw ci/openmeteo parquets) as
+  "Nightly forecast update: YYYY-MM-DD", then triggers the Render
+  redeploy webhook only when data was actually pushed AND the
+  `RENDER_DEPLOY_HOOK_URL` repo secret is set. A concurrency group
+  prevents overlapping runs racing on git push.
 
 ## Working preferences
 - Commit and push in stages — one logical change per commit, push after each.
