@@ -119,5 +119,10 @@ hooks on commit. Configuration lives in [pyproject.toml](pyproject.toml).
   `nightly.yml`. The workflow now reads it from a repo secret, but the
   old URL is still in git history forever — **rotate on Render** if it
   hasn't been done already.
+- `is_holiday` was constant 0 for the model's whole life: `Series.isin()`
+  against a lazily-populated `holidays.UnitedKingdom()` dict returns
+  all-False until the dict is seeded with years. `featurise.py` now seeds
+  it, but the shipped [models/model.cbm](models/model.cbm) was trained on
+  the constant-0 column — **retrain to actually benefit** from the flag.
 - No automated tests yet. The CI workflow only does compile + import
   checks. Item 12 of the improvement plan tracks the test backlog.

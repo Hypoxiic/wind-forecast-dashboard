@@ -129,8 +129,11 @@ def engineer_features(ci: pd.DataFrame, met: pd.DataFrame) -> pd.DataFrame:
     df["sin_dayofyear"]  = np.sin(2 * np.pi * df["dayofyear"] / 365.25)
     df["cos_dayofyear"]  = np.cos(2 * np.pi * df["dayofyear"] / 365.25)
 
-    # UK public holidays
-    uk_holidays = UnitedKingdom()
+    # UK public holidays. The holidays dict populates itself lazily per year,
+    # so it must be seeded with every year present in the data — Series.isin()
+    # against a fresh UnitedKingdom() sees an empty dict and returns all-False.
+    years = sorted(df["datetime"].dt.year.unique())
+    uk_holidays = UnitedKingdom(years=years)
     df["is_holiday"] = df["datetime"].dt.date.isin(uk_holidays).astype(int)
     logging.info("df shape after all features added (before dropna): %s", df.shape)
     logging.info("df NaNs after all features added (before dropna):\\n%s", df.isnull().sum().to_string())
