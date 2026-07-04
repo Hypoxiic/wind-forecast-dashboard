@@ -49,7 +49,7 @@ if not FEATURES_PATH.exists():
     raise FileNotFoundError(f"Features file not found at {FEATURES_PATH}")
 
 df = pd.read_parquet(FEATURES_PATH)
-df["datetime"] = pd.to_datetime(df["datetime"]) # Ensure datetime type
+df["datetime"] = pd.to_datetime(df["datetime"], utc=True) # Ensure tz-aware datetime type
 df = df.sort_values("datetime").reset_index(drop=True) # Ensure sorted for CV
 logging.info(f"Loaded DataFrame shape: {df.shape}")
 
@@ -90,6 +90,10 @@ for fold, (train_idx, val_idx) in enumerate(tscv.split(X)):
         eval_metric="RMSE",
         early_stopping_rounds=EARLY_STOPPING_ROUNDS,
         task_type=DEVICE,
+        # Match the production model's categorical declaration
+        # (train_model.py CAT_FEATURES) so cv_metrics.json measures the
+        # same configuration that ships.
+        cat_features=["is_holiday"],
     )
     if DEVICE == "GPU":
         cat_kwargs["devices"] = "0"
