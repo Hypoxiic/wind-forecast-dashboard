@@ -20,37 +20,32 @@ from datetime import date
 import numpy as np
 import pandas as pd
 import plotly.express as px
-from dash import Dash, Input, Output, dcc, html, callback_context, no_update
+from dash import Dash, Input, Output, State, dcc, html, callback_context, no_update
 import dash_bootstrap_components as dbc
 from dash_bootstrap_templates import ThemeSwitchAIO, load_figure_template
 from sklearn.metrics import mean_absolute_percentage_error, mean_squared_error
 
-# --- Setup dedicated file logger for dashboard debugging ---
-# Get the root logger
-# logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s") # This might conflict if set globally elsewhere, or can be primary
-
-# Create a specific logger for this dashboard module
+# --- Dashboard logger ---
+# Logs to stderr by default (captured by gunicorn/Render). Set
+# DASHBOARD_LOG_FILE to also write a local debug log. File-handler setup must
+# never crash worker boot (read-only filesystem, permissions), and no file is
+# deleted at import time (multiple gunicorn workers race on that).
 dash_logger = logging.getLogger("dashboard_app")
 dash_logger.setLevel(logging.INFO)
-# Create a file handler
-log_file_path = Path(__file__).parent / "dashboard_debug.log"
-try:
-    # Attempt to remove old log file to start fresh each run, if desired
-    if log_file_path.exists():
-        os.remove(log_file_path)
-except OSError as e:
-    print(f"Warning: Could not remove old log file {log_file_path}: {e}")
-
-file_handler = logging.FileHandler(log_file_path)
-file_handler.setLevel(logging.INFO)
-# Create a logging format
-formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-file_handler.setFormatter(formatter)
-# Add the handlers to the logger
 if not dash_logger.handlers: # Avoid adding multiple handlers on hot reloads
-    dash_logger.addHandler(file_handler)
-dash_logger.info("Dashboard logger initialized. Logging to: dashboard_debug.log")
-# --- End of logger setup ---
+    formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(formatter)
+    dash_logger.addHandler(stream_handler)
+    log_file_path = os.getenv("DASHBOARD_LOG_FILE")
+    if log_file_path:
+        try:
+            file_handler = logging.FileHandler(log_file_path, delay=True)
+            file_handler.setFormatter(formatter)
+            dash_logger.addHandler(file_handler)
+        except OSError as e:
+            dash_logger.warning("Could not open log file %s: %s", log_file_path, e)
+dash_logger.info("Dashboard logger initialized.")
 
 # ─── Paths & Constants ───────────────────────────────────────────────────────
 ROOT             = Path(__file__).resolve().parents[1]
@@ -71,8 +66,6 @@ THEME_DARK  = "plotly_dark"
 CSS_LIGHT   = dbc.themes.MINTY
 CSS_DARK    = dbc.themes.CYBORG
 
-os.environ["DASH_DEBUG_UI"] = "false"
-
 # ─── Utility Functions ───────────────────────────────────────────────────────
 def safe_json(path: Path) -> dict:
     try:
@@ -86,6 +79,18 @@ def load_parquet(path: Path, cols: list[str]) -> pd.DataFrame:
         df["datetime"] = pd.to_datetime(df["datetime"], utc=True)
         return df
     return pd.DataFrame(columns=cols)
+
+def fmt_metric(val, fmt: str = "{:.2f}") -> str:
+    """Format a metric for display, showing N/A instead of literal 'nan'."""
+    return fmt.format(val) if not np.isnan(val) else "N/A"
+
+def data_last_updated() -> str:
+    """Freshness stamp derived from the data files themselves, not from the
+    render time — a failed nightly run must not masquerade as fresh data."""
+    mtimes = [p.stat().st_mtime for p in (LATEST_PRED_PATH, HISTORY_PATH) if p.exists()]
+    if not mtimes:
+        return "unknown"
+    return pd.Timestamp(max(mtimes), unit="s", tz="UTC").strftime("%Y-%m-%d %H:%M UTC")
 
 # ─── Load Metrics ────────────────────────────────────────────────────────────
 raw_metrics = safe_json(METRICS_PATH)
@@ -117,7 +122,9 @@ elif not latest_preds_df.empty:
     all_preds_df = latest_preds_df.copy()
 else:
     all_preds_df = pd.DataFrame(columns=["datetime", "wind_perc_pred"])
-    all_preds_df['datetime'] = pd.to_datetime(all_preds_df['datetime'])
+    # utc=True: must stay tz-aware or the outer merge with tz-aware hist_df
+    # raises at import time and gunicorn workers boot-loop.
+    all_preds_df['datetime'] = pd.to_datetime(all_preds_df['datetime'], utc=True)
 
 # Merge with hist_df (actuals and baseline)
 if not hist_df.empty:
@@ -208,25 +215,13 @@ def make_card(title, value, unit, colour, tooltip=None):
         return dbc.Col([card, dbc.Tooltip(tooltip, target=cid, placement="top")])
     return dbc.Col(card)
 
-rmse_col, rmse_ic = delta_colour(cat_rmse, baseline_rmse)
-mape_col, mape_ic = delta_colour(cat_mape, baseline_mape)
-
-card_baseline_rmse = make_card("Baseline RMSE",
-    f"{baseline_rmse:.2f}", "%", "light")
-card_baseline_mape = make_card("Baseline MAPE",
-    f"{baseline_mape*100:.1f}", "%", "light")
-card_cat_rmse = make_card("CatBoost RMSE",
-    f"{cat_rmse:.2f}", f"% {rmse_ic}", rmse_col,
-    tooltip=f"Δ {(baseline_rmse - cat_rmse)/baseline_rmse:+.0%}"
-)
-card_cat_mape = make_card("CatBoost MAPE",
-    f"{cat_mape*100:.1f}", f"% {mape_ic}", mape_col,
-    tooltip=f"Δ {(baseline_mape - cat_mape)/baseline_mape:+.1%}"
-)
-
 # ─── Build Dash App ─────────────────────────────────────────────────────────
 load_figure_template(THEME_LIGHT)
-app    = Dash(__name__, external_stylesheets=[CSS_LIGHT])
+# suppress_callback_exceptions: the per-tab export buttons are created
+# dynamically inside tab content, so their callback targets aren't in the
+# initial layout.
+app    = Dash(__name__, external_stylesheets=[CSS_LIGHT],
+              suppress_callback_exceptions=True)
 server = app.server
 app.title = "GB Wind Day-Ahead Forecast"
 
@@ -288,8 +283,8 @@ app.layout = dbc.Container([
           className="mb-2"
         ),
         html.P(
-          f"Hold-out (last 24 h) error from training: RMSE ≈ {cat_rmse:.2f}% • "
-          f"MAPE ≈ {cat_mape*100:.1f}%.",
+          f"Hold-out (last 48 h) error from training: RMSE ≈ {fmt_metric(cat_rmse)}% • "
+          f"MAPE ≈ {fmt_metric(cat_mape * 100, '{:.1f}')}%.",
           className="fst-italic small mb-0"
         )
     ]), className="mb-4 border-0 shadow-sm", style={"border": "2px solid #2E7D32", "padding": "12px", "border-radius": "8px", "box-shadow": "0 2px 4px rgba(0,0,0,0.1)"}),
@@ -319,14 +314,16 @@ app.layout = dbc.Container([
                 dbc.Col(date_picker_global, width=4),
                 dbc.Col(html.Div([
                     html.Span("Last updated: ", className="text-muted"),
-                    html.Span(pd.Timestamp.now().strftime("%Y-%m-%d") + " 01:30 UTC")
+                    html.Span(data_last_updated())
                 ]), width=4, className="text-end")
             ], align="center")
         ])
     ], className="mb-4", style={"border": "2px solid #2E7D32", "padding": "12px", "border-radius": "8px", "box-shadow": "0 2px 4px rgba(0,0,0,0.1)"}),
     
     html.Div(id="tab-content"),
-    
+
+    dcc.Download(id="download-data"),
+
 ], fluid=True, className="dbc dbc-row-selectable", style={"maxWidth":"1400px", "paddingTop":"18px"})
 
 # ─── Callbacks ──────────────────────────────────────────────────────────────
@@ -352,8 +349,8 @@ def render_content(is_dark, active_tab, series_sel, start_d_global, end_d_global
         card_baseline_mape_fc = make_card("Baseline MAPE (Recent Actuals)", f"{baseline_mape*100:.1f}" if not np.isnan(baseline_mape) else "N/A", "%", "light")
         cat_rmse_col, cat_rmse_ic = delta_colour(cat_rmse, baseline_rmse)
         cat_mape_col, cat_mape_ic = delta_colour(cat_mape, baseline_mape)
-        card_cat_rmse_fc = make_card("Model RMSE (Holdout)", f"{cat_rmse:.2f}", f"% {cat_rmse_ic}", cat_rmse_col, tooltip=f"Model holdout vs recent baseline Δ {(cat_rmse-baseline_rmse)/baseline_rmse:+.0%}" if not (np.isnan(cat_rmse) or np.isnan(baseline_rmse)) else "Model holdout from training")
-        card_cat_mape_fc = make_card("Model MAPE (Holdout)", f"{cat_mape*100:.1f}", f"% {cat_mape_ic}", cat_mape_col, tooltip=f"Model holdout vs recent baseline Δ {(cat_mape-baseline_mape)/baseline_mape:+.1%}" if not (np.isnan(cat_mape) or np.isnan(baseline_mape)) else "Model holdout from training")
+        card_cat_rmse_fc = make_card("Model RMSE (Holdout)", fmt_metric(cat_rmse), f"% {cat_rmse_ic}", cat_rmse_col, tooltip=f"Model holdout vs recent baseline Δ {(cat_rmse-baseline_rmse)/baseline_rmse:+.0%}" if not (np.isnan(cat_rmse) or np.isnan(baseline_rmse)) else "Model holdout from training")
+        card_cat_mape_fc = make_card("Model MAPE (Holdout)", fmt_metric(cat_mape * 100, "{:.1f}"), f"% {cat_mape_ic}", cat_mape_col, tooltip=f"Model holdout vs recent baseline Δ {(cat_mape-baseline_mape)/baseline_mape:+.1%}" if not (np.isnan(cat_mape) or np.isnan(baseline_mape)) else "Model holdout from training")
         kpi_cards_content = [dbc.Row([card_baseline_rmse_fc, card_baseline_mape_fc, card_cat_rmse_fc, card_cat_mape_fc], className="g-4 mb-4")]
 
         # --- Content for Forecast & Recent Tab ---
@@ -381,11 +378,13 @@ def render_content(is_dark, active_tab, series_sel, start_d_global, end_d_global
             )
             
             # Chart enhancements
+            span_days = max((df_forecast_tab.datetime.max() - df_forecast_tab.datetime.min()).days, 0)
+            show_markers = span_days <= 14  # per-point SVG markers hang the browser on long ranges
             for trace in fig_fc.data:
                 # Increase line thickness to 2.5px
                 trace.line.width = 2.5
                 # Add subtle point markers every 6 hours
-                trace.mode = 'lines+markers'
+                trace.mode = 'lines+markers' if show_markers else 'lines'
                 trace.marker.size = 8
                 trace.marker.opacity = 0.8
                 # Make markers more visible
@@ -399,14 +398,21 @@ def render_content(is_dark, active_tab, series_sel, start_d_global, end_d_global
                 if trace.name == "wind_perc":
                     trace.line.width = 3.0
                     trace.marker.size = 9
-                    trace.zorder = 10  # Try to keep it on top
+                    # zorder only exists on SVG Scatter traces; px.line
+                    # auto-switches to Scattergl (WebGL) on large data, which
+                    # lacks it and raises ValueError, killing the tab render.
+                    if hasattr(trace, "zorder"):
+                        trace.zorder = 10  # Try to keep it on top
             
-            # Add light gray vertical lines at midnight transitions
-            for day in pd.date_range(start=df_forecast_tab.datetime.min().floor('D'), 
-                                    end=df_forecast_tab.datetime.max().ceil('D'), 
-                                    freq='D'):
-                fig_fc.add_vline(x=day, line_width=1, line_dash="dot", 
-                                line_color="rgba(150, 150, 150, 0.3)")
+            # Add light gray vertical lines at midnight transitions.
+            # Each vline is a layout shape; thousands of shapes on a long
+            # range freeze the browser, so only draw them on short windows.
+            if span_days <= 31:
+                for day in pd.date_range(start=df_forecast_tab.datetime.min().floor('D'),
+                                        end=df_forecast_tab.datetime.max().ceil('D'),
+                                        freq='D'):
+                    fig_fc.add_vline(x=day, line_width=1, line_dash="dot",
+                                    line_color="rgba(150, 150, 150, 0.3)")
             
             # Layout enhancements
             fig_fc.update_layout(
@@ -577,7 +583,7 @@ def render_content(is_dark, active_tab, series_sel, start_d_global, end_d_global
                 # Add last updated timestamp
                 html.Div([
                     html.Span("Last updated: ", className="text-muted"),
-                    html.Span(pd.Timestamp.now().strftime("%Y-%m-%d") + " 01:30 UTC")
+                    html.Span(data_last_updated())
                 ], className="mb-3 text-end"),
                 
                 # Main chart with export button
@@ -648,16 +654,10 @@ def render_content(is_dark, active_tab, series_sel, start_d_global, end_d_global
         kpi_cards_content = [dbc.Row([card_dyn_baseline_rmse, card_dyn_baseline_mape, card_dyn_cat_rmse, card_dyn_cat_mape], className="g-4 mb-4")]
         
         # --- Content for Historical Analysis Tab (Plot) ---
-        # (Keep diagnostic logging as is for now, can be removed later)
-        if not df_hist_tab.empty:
-            dash_logger.info(f"Historical tab: df_hist_tab from {start_d_global} to {end_d_global} (example slice):\n" \
-                         f"{df_hist_tab[(df_hist_tab.datetime >= pd.Timestamp('2019-01-01', tz='UTC')) & (df_hist_tab.datetime <= pd.Timestamp('2019-01-03', tz='UTC'))][['datetime', 'wind_perc', 'wind_perc_pred']].to_string()}")
-            if series_sel:
-                 dash_logger.info(f"NaN counts in selected df_hist_tab for series {series_sel}:\n{df_hist_tab[series_sel if isinstance(series_sel, list) else [series_sel]].isnull().sum().to_string()}")
-            else:
-                dash_logger.info("Historical tab: No series selected.")
-        else:
-            dash_logger.info("Historical tab: df_hist_tab is empty for the selected range.")
+        dash_logger.info(
+            "Historical tab: %s rows selected from %s to %s (series=%s)",
+            len(df_hist_tab), start_d_global, end_d_global, series_sel,
+        )
 
         if df_hist_tab.empty or not series_sel:
             fig_historical_content = html.Div("No data available for that selection.")
@@ -669,11 +669,13 @@ def render_content(is_dark, active_tab, series_sel, start_d_global, end_d_global
             )
             
             # Chart enhancements
+            span_days = max((df_hist_tab.datetime.max() - df_hist_tab.datetime.min()).days, 0)
+            show_markers = span_days <= 14  # per-point SVG markers hang the browser on long ranges
             for trace in fig_hist.data:
                 # Increase line thickness to 2.5px
                 trace.line.width = 2.5
                 # Add subtle point markers every 6 hours
-                trace.mode = 'lines+markers'
+                trace.mode = 'lines+markers' if show_markers else 'lines'
                 trace.marker.size = 8
                 trace.marker.opacity = 0.8
                 # Make markers more visible
@@ -687,14 +689,22 @@ def render_content(is_dark, active_tab, series_sel, start_d_global, end_d_global
                 if trace.name == "wind_perc":
                     trace.line.width = 3.0
                     trace.marker.size = 9
-                    trace.zorder = 10  # Try to keep it on top
+                    # zorder only exists on SVG Scatter traces; px.line
+                    # auto-switches to Scattergl (WebGL) on large data, which
+                    # lacks it and raises ValueError, killing the tab render.
+                    if hasattr(trace, "zorder"):
+                        trace.zorder = 10  # Try to keep it on top
             
-            # Add light gray vertical lines at midnight transitions
-            for day in pd.date_range(start=df_hist_tab.datetime.min().floor('D'), 
-                                    end=df_hist_tab.datetime.max().ceil('D'), 
-                                    freq='D'):
-                fig_hist.add_vline(x=day, line_width=1, line_dash="dot", 
-                                line_color="rgba(150, 150, 150, 0.3)")
+            # Add light gray vertical lines at midnight transitions.
+            # Each vline is a layout shape; the default All-Time range spans
+            # ~2,500 days and that many shapes freeze the browser, so only
+            # draw them on short windows.
+            if span_days <= 31:
+                for day in pd.date_range(start=df_hist_tab.datetime.min().floor('D'),
+                                        end=df_hist_tab.datetime.max().ceil('D'),
+                                        freq='D'):
+                    fig_hist.add_vline(x=day, line_width=1, line_dash="dot",
+                                    line_color="rgba(150, 150, 150, 0.3)")
             
             # Layout enhancements
             fig_hist.update_layout(
@@ -827,7 +837,7 @@ def render_content(is_dark, active_tab, series_sel, start_d_global, end_d_global
                 # Add last updated timestamp and export button
                 html.Div([
                     html.Span("Last updated: ", className="text-muted"),
-                    html.Span(pd.Timestamp.now().strftime("%Y-%m-%d") + " 01:30 UTC"),
+                    html.Span(data_last_updated()),
                     dbc.Button(
                         "Export Data", 
                         color="secondary", 
@@ -871,19 +881,47 @@ def update_date_range(last_24h, last_7d, last_30d, all_time):
         return no_update, no_update
     
     button_id = ctx.triggered[0]["prop_id"].split(".")[0]
-    today = pd.Timestamp.today().date()
-    
+    # Clamp presets to the available data range so the picker never receives
+    # dates outside its min/max allowed bounds.
+    end = min(pd.Timestamp.today().date(), max_d)
+
     if button_id == "btn-last-24h":
-        return today - pd.Timedelta(days=1), today
+        return max(end - pd.Timedelta(days=1), min_d), end
     elif button_id == "btn-last-7d":
-        return today - pd.Timedelta(days=7), today
+        return max(end - pd.Timedelta(days=7), min_d), end
     elif button_id == "btn-last-30d":
-        return today - pd.Timedelta(days=30), today
+        return max(end - pd.Timedelta(days=30), min_d), end
     elif button_id == "btn-all-time":
         return min_d, max_d
-    
+
     return no_update, no_update
+
+# Export the currently selected date range as CSV. All three Export buttons
+# share this callback; the in-tab ones are created dynamically, hence
+# suppress_callback_exceptions on the app.
+@app.callback(
+    Output("download-data", "data"),
+    [Input("btn-export-main", "n_clicks"),
+     Input("btn-export-data", "n_clicks"),
+     Input("btn-export-hist-data", "n_clicks")],
+    [State("date-picker-global", "start_date"),
+     State("date-picker-global", "end_date")],
+    prevent_initial_call=True,
+)
+def export_data(n_main, n_tab, n_hist, start_d, end_d):
+    if not callback_context.triggered or not any(n for n in (n_main, n_tab, n_hist) if n):
+        return no_update
+    df = plot_data
+    if start_d and end_d:
+        df = df[
+            (df.datetime.dt.date >= pd.to_datetime(start_d).date())
+            & (df.datetime.dt.date <= pd.to_datetime(end_d).date())
+        ]
+    return dcc.send_data_frame(df.to_csv, "wind_forecast_data.csv", index=False)
 
 # ─── Run Server ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    app.run(debug=True)
+    # Debug mode (Werkzeug debugger + hot reload) is opt-in via DASH_DEBUG=1.
+    # It must never be the default: the Werkzeug console is remote code
+    # execution if the port is ever reachable from another machine.
+    app.run(debug=os.getenv("DASH_DEBUG", "").lower() in ("1", "true", "yes"))
