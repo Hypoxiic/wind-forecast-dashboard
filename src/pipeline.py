@@ -1,7 +1,6 @@
 #! /usr/bin/env python
 # src/pipeline.py
 
-import shutil
 from pathlib import Path
 import pandas as pd
 import sys, os
@@ -12,7 +11,7 @@ import featurise
 import predict
 
 def main():
-    # ─── Define paths & safeguard static full history ────────────────────────
+    # ─── Define paths ─────────────────────────────────────────────────────────
     BASE           = Path(__file__).resolve().parents[1]
     feats_dir      = BASE / "data" / "features"
     orig_feats     = feats_dir / "features.parquet"
@@ -20,80 +19,48 @@ def main():
     predict_feats  = feats_dir / "for_predict.parquet"
     history_pth    = feats_dir / "history.parquet"
 
-    # If we haven’t yet preserved the original full-history, do so now
-    if not full_hist.exists() and orig_feats.exists():
-        print(f"Creating static full-history snapshot: {full_hist.name}")
-        shutil.copy(orig_feats, full_hist)
-
     # ─── Step 1: pull raw data for inference ────────────────────────────────
+    # Raises on API failure so the nightly job fails visibly instead of
+    # silently republishing predictions built from stale raw parquets.
     etl.main()        # writes data/raw/ci.parquet & data/raw/openmeteo_weather.parquet
 
-    # ─── Step 2: build ONLY the new inference features ──────────────────────
-    # featurise.main() will overwrite data/features/features.parquet with just the newest rows
-    featurise.main()
+    # ─── Step 2: build inference features straight into for_predict.parquet ─
+    # featurise no longer clobbers features.parquet, so the old
+    # move/restore-from-snapshot dance (and its crash window) is gone.
+    featurise.main(mode="inference")
 
-    # ─── Step 3: split off inference features & restore full history ────────
-    if orig_feats.exists():
-        print(f"Moving new features from {orig_feats.name} to {predict_feats.name}")
-        shutil.move(orig_feats, predict_feats)
-    else:
-        print(f"Error: expected {orig_feats.name} but it was not found.")
-        # create an empty file to avoid downstream errors
-        predict_feats.touch()
+    if not predict_feats.exists() or predict_feats.stat().st_size == 0:
+        raise FileNotFoundError(f"{predict_feats} was not produced; aborting nightly run.")
+    new_feats = pd.read_parquet(predict_feats)
+    if new_feats.empty:
+        raise ValueError(f"{predict_feats} contains no rows; aborting nightly run.")
+    print(f"Loaded {len(new_feats)} new feature rows from {predict_feats.name}")
 
+    # ─── Step 3: rolling history = union of snapshot, prior history, new rows ─
+    # Idempotent merge keyed on datetime; later frames win on overlap, so a
+    # regenerated snapshot can never wipe rows accumulated by earlier runs
+    # (the old len(hist) < len(full) heuristic could).
+    frames = []
     if full_hist.exists():
-        print(f"Restoring full history from {full_hist.name} to {orig_feats.name}")
-        shutil.copy(full_hist, orig_feats)
-    else:
-        print(f"Warning: static snapshot {full_hist.name} not found; {orig_feats.name} may be incomplete.")
-
-    # Load the newly generated features for prediction
-    if predict_feats.exists() and predict_feats.stat().st_size > 0:
-        new_feats = pd.read_parquet(predict_feats)
-        print(f"Loaded {len(new_feats)} new feature rows from {predict_feats.name}")
-    else:
-        print(f"Warning: {predict_feats.name} is missing or empty; no new features to append.")
-        new_feats = pd.DataFrame(columns=[])
-
-    # ─── Step 4: build/append rolling history ────────────────────────────────
-    # Prefer reinitializing from the static snapshot if history is stale
+        frames.append(pd.read_parquet(full_hist))
+    elif orig_feats.exists():
+        frames.append(pd.read_parquet(orig_feats))
     if history_pth.exists():
-        hist = pd.read_parquet(history_pth)
-        if full_hist.exists():
-            full = pd.read_parquet(full_hist)
-            if len(hist) < len(full):
-                print(f"Detected stale history ({len(hist)} rows) < full snapshot ({len(full)} rows). Reinitialising.")
-                hist = full
-    elif full_hist.exists():
-        print(f"Initialising rolling history from static snapshot {full_hist.name}")
-        hist = pd.read_parquet(full_hist)
-    else:
-        print("No history file found; starting history with new features only.")
-        hist = new_feats.copy()
+        frames.append(pd.read_parquet(history_pth))
+    frames.append(new_feats)
 
-    # Append new features if any
-    if not new_feats.empty:
-        hist = pd.concat([hist, new_feats], ignore_index=True)
-        hist = (
-            hist
-            .drop_duplicates(subset="datetime", keep="last")
-            .sort_values("datetime")
-            .reset_index(drop=True)
-        )
-        print(f"Appended new features. History now has {len(hist)} rows.")
-    else:
-        print("Skipping history append step (no new features).")
+    hist = (
+        pd.concat(frames, ignore_index=True)
+        .drop_duplicates(subset="datetime", keep="last")
+        .sort_values("datetime")
+        .reset_index(drop=True)
+    )
+    print(f"Saving rolling history ({len(hist)} rows) to {history_pth.name}")
+    hist.to_parquet(history_pth, index=False)
 
-    # Save updated rolling history
-    if not hist.empty:
-        print(f"Saving updated rolling history to {history_pth.name}")
-        hist.to_parquet(history_pth, index=False)
-    else:
-        print(f"Skipping saving empty history to {history_pth.name}")
-
-    # ─── Step 5: run prediction on just the new features ────────────────────
+    # ─── Step 4: run prediction on just the new features ────────────────────
     print("Starting prediction step...")
-    predict.main()   # should read data/features/for_predict.parquet and write data/predictions/latest.parquet
+    predict.main()   # reads data/features/for_predict.parquet, writes data/predictions/latest.parquet
     print("Prediction step finished.")
 
 if __name__ == "__main__":

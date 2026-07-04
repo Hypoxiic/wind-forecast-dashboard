@@ -182,23 +182,23 @@ def main():
     logging.info(f"Fetching Carbon Intensity wind percentage ({days_needed_history} days history)...")
     wind_perc_df = fetch_ci_wind_perc_history(today, days_needed_history)
     if wind_perc_df.empty:
-        logging.error("Failed to get wind percentage data. Aborting.")
-        return
+        # Raise instead of returning: a silent return lets the pipeline carry
+        # on with the stale raw parquets in the checkout and republish old
+        # forecasts as a fresh nightly update with a green build.
+        raise RuntimeError("Failed to get wind percentage data from the Carbon Intensity API; aborting.")
     logging.info(f"Fetched {len(wind_perc_df)} rows of wind percentage data.")
 
     logging.info(f"Fetching Open‑Meteo weather ({days_needed_history} days history)...")
     meteo_history_df = fetch_weather_history(today, days_needed_history)
     if meteo_history_df.empty:
-        logging.error("Failed to get historical weather data. Aborting.")
-        return
+        raise RuntimeError("Failed to get historical weather data from Open-Meteo; aborting.")
     logging.info(f"Fetched {len(meteo_history_df)} rows of historical weather.")
     logging.info(f"NaNs in meteo_history_df:\n{meteo_history_df.isnull().sum().to_string()}")
 
     logging.info("Fetching Open‑Meteo weather (forecast 48h)...")
     meteo_forecast_df = fetch_weather_forecast(today)
     if meteo_forecast_df.empty:
-        logging.error("Failed to get forecast weather data. Aborting.")
-        return
+        raise RuntimeError("Failed to get forecast weather data from Open-Meteo; aborting.")
     logging.info(f"Fetched {len(meteo_forecast_df)} rows of forecast weather.")
     logging.info(f"NaNs in meteo_forecast_df:\n{meteo_forecast_df.isnull().sum().to_string()}")
 

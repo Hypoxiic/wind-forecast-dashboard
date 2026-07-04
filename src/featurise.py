@@ -4,7 +4,8 @@ src/featurise.py
 Merge raw ci wind generation & Open‑Meteo wind‑speed data,
 then create modelling features (lags, rolling stats, calendar cycles, holidays).
 
-Output:  data/features/features.parquet
+Output:  data/features/training_features.parquet (training mode)
+         data/features/for_predict.parquet       (inference mode)
 """
 
 from __future__ import annotations
@@ -99,8 +100,11 @@ def engineer_features(ci: pd.DataFrame, met: pd.DataFrame) -> pd.DataFrame:
     # df is hourly after merge_asof(met, ci, ...)
     # Original wind_perc was 30-min, but is now aligned to hourly by the merge.
     # So, shift(N) on both wind_perc and wind_speed_10m will be an N-hour shift.
+    # NOTE: "30m" maps to a 1-hour shift, so the *_lag_30m columns duplicate
+    # *_lag_1h exactly. They are kept because the shipped model.cbm was
+    # trained with both columns; dropping one requires retraining.
     hourly_lag_config = {   # label : hours_to_shift
-        "30m": 1,       # No 0.5h shift on hourly data, use 1h as proxy or consider if needed
+        "30m": 1,       # duplicates the 1h lag on hourly data (see NOTE above)
         "1h":  1,
         "3h":  3,
         "24h": 24,
@@ -112,7 +116,11 @@ def engineer_features(ci: pd.DataFrame, met: pd.DataFrame) -> pd.DataFrame:
         df[f"wind_speed_lag_{label}"] = df["wind_speed_10m"].shift(lag_hours)
 
     # ─── rolling stats on wind‑speed ─
-    roll_steps = {6: "3h", 48: "24h", 96: "48h"}  # windows in 30‑min steps
+    # Window sizes are in HOURLY rows (the data is hourly after merge_asof),
+    # so the actual spans are 6h/48h/96h — double what the "3h/24h/48h"
+    # labels claim. The mislabeled column names are kept because the shipped
+    # model.cbm was trained on them; correcting spans/names needs a retrain.
+    roll_steps = {6: "3h", 48: "24h", 96: "48h"}
     for steps, label in roll_steps.items():
         # Use min_periods=1 to ensure calculation even if full window not available (common at start of series)
         df[f"wind_speed_roll_mean_{label}"] = df["wind_speed_10m"].rolling(window=steps, min_periods=1).mean()
@@ -181,49 +189,43 @@ def main(mode: str = "inference") -> None:
 
     if mode == "training":
         CURRENT_RAW_DIR = RAW_DIR_BASE / "training"
-        CURRENT_FEAT_DIR = FEAT_DIR_BASE
         CI_PARQUET = CURRENT_RAW_DIR / "ci_wind_perc_training.parquet"
         MET_PARQUET = CURRENT_RAW_DIR / "openmeteo_weather_training.parquet"
-        OUT_PARQUET = CURRENT_FEAT_DIR / "training_features.parquet"
-        logging.info(f"Training mode: Using full historical raw data.")
-        logging.info(f"  Input CI: {CI_PARQUET}")
-        logging.info(f"  Input Met: {MET_PARQUET}")
-        logging.info(f"  Output Features: {OUT_PARQUET}")
-    else: # Inference mode (default)
+        OUT_PARQUET = FEAT_DIR_BASE / "training_features.parquet"
+        logging.info("Training mode: Using full historical raw data.")
+    elif mode == "inference":
         CURRENT_RAW_DIR = RAW_DIR_BASE # Uses the top-level raw directory
-        CURRENT_FEAT_DIR = FEAT_DIR_BASE
         CI_PARQUET = CURRENT_RAW_DIR / "ci.parquet"
         MET_PARQUET = CURRENT_RAW_DIR / "openmeteo_weather.parquet"
-        OUT_PARQUET = CURRENT_FEAT_DIR / "features.parquet"
-        logging.info(f"Inference mode: Using daily raw data for prediction.")
-        logging.info(f"  Input CI: {CI_PARQUET}")
-        logging.info(f"  Input Met: {MET_PARQUET}")
-        logging.info(f"  Output Features: {OUT_PARQUET}")
+        # Written straight to the prediction input. data/features/features.parquet
+        # (the committed full-history snapshot) is never overwritten by the
+        # nightly run, so no move/restore dance is needed in pipeline.py.
+        OUT_PARQUET = FEAT_DIR_BASE / "for_predict.parquet"
+        logging.info("Inference mode: Using daily raw data for prediction.")
+    else:
+        raise ValueError(f"Unknown featurise mode: {mode!r}")
 
-    # Check existence based on CURRENT_RAW_DIR
-    if not CI_PARQUET.parent.exists() or not MET_PARQUET.parent.exists():
-        # A bit more specific error for clarity
-        if mode == "training" and not (RAW_DIR_BASE / "training").exists():
-            logging.error(f"Input directory for training data does not exist: {RAW_DIR_BASE / 'training'}")
-        elif mode == "inference" and not RAW_DIR_BASE.exists(): # Assuming ci.parquet and openmeteo_weather.parquet are directly in raw for inference
-            logging.error(f"Input directory for inference data does not exist: {RAW_DIR_BASE}")
-        else:
-            logging.error(f"One or both input data parent directories do not exist: {CI_PARQUET.parent}, {MET_PARQUET.parent}")
-        return
+    logging.info(f"  Input CI: {CI_PARQUET}")
+    logging.info(f"  Input Met: {MET_PARQUET}")
+    logging.info(f"  Output Features: {OUT_PARQUET}")
+
+    if not CI_PARQUET.exists() or not MET_PARQUET.exists():
+        raise FileNotFoundError(
+            f"Missing raw input(s): {CI_PARQUET}, {MET_PARQUET} — run the ETL step first."
+        )
 
     ci, met = load_raw() # load_raw will use the global CI_PARQUET and MET_PARQUET
-    if ci.empty and met.empty:
-        logging.warning("Both CI and MET dataframes are empty. Skipping feature engineering.")
-        # Create an empty parquet file if it does not exist to prevent downstream errors
-        if not OUT_PARQUET.exists():
-            pd.DataFrame().to_parquet(OUT_PARQUET, index=False)
-            logging.info(f"Created empty output file as inputs were empty: {OUT_PARQUET}")
-        return
-    
+    if ci.empty or met.empty:
+        raise ValueError(
+            "Raw CI and/or weather data is empty; refusing to build features "
+            "so stale downstream outputs are kept instead of overwritten."
+        )
+
     features = engineer_features(ci, met)
-    
     if features.empty:
-        logging.warning("Feature engineering resulted in an empty DataFrame. Saving empty parquet.")
+        raise ValueError(
+            "Feature engineering produced no rows; aborting instead of writing an empty file."
+        )
     features.to_parquet(OUT_PARQUET, index=False)
     logging.info("Saved engineered features → %s (%s rows)", OUT_PARQUET, len(features))
 

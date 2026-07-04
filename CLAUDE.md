@@ -26,10 +26,12 @@ Produces [models/model.cbm](models/model.cbm),
 Produces [data/predictions/latest.parquet](data/predictions/latest.parquet) and
 [data/features/history.parquet](data/features/history.parquet).
 
-`pipeline.py` does file-shuffling state management:
-moves `features.parquet` → `for_predict.parquet`, restores
-`features_full_history.parquet` over `features.parquet`. Treat that flow as
-load-bearing; missing snapshots silently produce empty outputs.
+featurise (inference mode) writes `for_predict.parquet` directly;
+`features.parquet` is a committed full-history snapshot the nightly run
+never touches. `pipeline.py` then unions snapshot + prior history + new
+rows into `history.parquet` (idempotent, keyed on `datetime`) and fails
+loudly — any empty or missing input raises, so the Actions job goes red
+instead of republishing stale forecasts as a fresh nightly update.
 
 ## Data sources
 - **Carbon Intensity API** — GB wind generation as % of mix (the target).
