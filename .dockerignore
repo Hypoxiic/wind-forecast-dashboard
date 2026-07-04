@@ -1,0 +1,15 @@
+.git
+.github
+.gitignore
+.dockerignore
+__pycache__/
+*.pyc
+.venv/
+catboost_info/
+notebooks/
+docs/
+*.log
+data/meteo/
+Dockerfile
+Procfile
+README.md
