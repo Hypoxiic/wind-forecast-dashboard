@@ -43,12 +43,18 @@ jobs:
         run: |
           git config user.name  "Wind-Bot"
           git config user.email "actions@github.com"
-          # Stage every tracked file the pipeline rewrites, so the repo
-          # stays consistent with the inputs that produced each prediction.
-          git add data/predictions/latest.parquet
-          git add data/features/history.parquet
-          git add data/features/for_predict.parquet
-          git add data/raw/ci.parquet data/raw/openmeteo_weather.parquet
+          # Stage every tracked file the pipeline rewrites, so the repo stays
+          # consistent with the inputs that produced each prediction. These
+          # live under the gitignored data/ tree but are intentionally tracked;
+          # -f is REQUIRED because `git add` of an ignored path exits non-zero
+          # (even for an already-tracked file), which under set -e silently
+          # broke every nightly commit once .gitignore started ignoring data/.
+          git add -f \
+            data/predictions/latest.parquet \
+            data/features/history.parquet \
+            data/features/for_predict.parquet \
+            data/raw/ci.parquet \
+            data/raw/openmeteo_weather.parquet
 
           if git diff --staged --quiet; then
             echo "No changes to commit."

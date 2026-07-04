@@ -127,5 +127,12 @@ hooks on commit. Configuration lives in [pyproject.toml](pyproject.toml).
   all-False until the dict is seeded with years. `featurise.py` now seeds
   it, but the shipped [models/model.cbm](models/model.cbm) was trained on
   the constant-0 column — **retrain to actually benefit** from the flag.
+- The nightly commit step MUST use `git add -f` for the data/ parquets.
+  They are tracked-despite-gitignore, and `git add` of an ignored path
+  exits non-zero even for a tracked file (git 2.54), which under the
+  Actions `set -e` aborted the step. This silently broke every nightly
+  from ~2026-05-07 (when the UTF-16 .gitignore was fixed to actually
+  ignore data/) until the `-f` fix. That is why the live demo data went
+  stale.
 - No automated tests yet. The CI workflow only does compile + import
   checks. Item 12 of the improvement plan tracks the test backlog.
