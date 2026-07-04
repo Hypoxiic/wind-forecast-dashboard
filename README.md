@@ -1,6 +1,6 @@
 # Wind Day‑Ahead Forecast & Dashboard
 
-Live demo → [https://wind‑forecast-dashboard.onrender.com](https://wind‑forecast-dashboard.onrender.com)  (Free Render service – cold‑start ≤ 30 s)
+Live demo -> [https://wind-forecast-dashboard.onrender.com](https://wind-forecast-dashboard.onrender.com)  (Free Render service - cold-start <= 30 s)
 
 *A concise, fully‑reproducible mini‑project that forecasts the **day‑ahead percentage of Great‑Britain wind generation in the national mix** and serves the results through an interactive Dash app.*
 
@@ -45,7 +45,7 @@ Short‑horizon wind output (as a percentage of the mix) drives GB's supply‑de
 (Carbon‑Intensity API + Open‑Meteo forecast) ─▶ src/pipeline.py orchestrates:
                                                   ├─▶ src/etl_inference.py  ─▶ data/raw/ (ci.parquet, openmeteo_weather.parquet)
                                                   │
-                                                  ├─▶ src/featurise.py (inf. mode) ─▶ data/features/ (features.parquet, for_predict.parquet)
+                                                  ├─▶ src/featurise.py (inf. mode) ─▶ data/features/for_predict.parquet
                                                   │
                                                   ├─▶ src/predict.py    ─▶ data/predictions/latest.parquet
                                                   │  (using models/model.cbm)
@@ -69,8 +69,8 @@ A GitHub Actions workflow (`.github/workflows/nightly.yml`) runs at **01:30 UTC*
     b. Generates features for the inference period using `src/featurise.py` (inference mode).
     c. Runs the prediction using the trained model (`models/model.cbm`) via `src/predict.py`.
     d. Updates the rolling `data/features/history.parquet`.
-2. Commits & pushes the updated `data/predictions/latest.parquet` and `data/features/history.parquet`.
-3. Render (if configured for auto-deploy) redeploys the Dash app with the latest data.
+2. Commits & pushes the updated prediction/history parquets (plus the raw inputs that produced them).
+3. Triggers a Render deploy via the `RENDER_DEPLOY_HOOK_URL` **Actions secret** — only when data was actually pushed. The hook URL contains a secret key; never commit it (the previously committed one must be rotated in the Render dashboard, since git history keeps it readable forever).
 
 ---
 
