@@ -174,22 +174,12 @@ def engineer_features(ci: pd.DataFrame, met: pd.DataFrame) -> pd.DataFrame:
 # ──────────────────────────
 # Main
 # ──────────────────────────
-def main() -> None:
+def main(mode: str = "inference") -> None:
     global CI_PARQUET, MET_PARQUET, OUT_PARQUET # Declare global to modify
 
-    parser = argparse.ArgumentParser(description="Featurisation script for wind generation data.")
-    parser.add_argument(
-        "--mode", 
-        type=str, 
-        default="inference", 
-        choices=["training", "inference"],
-        help="Mode of operation: 'training' for full historical data, 'inference' for daily prediction data."
-    )
-    args = parser.parse_args()
+    logging.info(f"Running featurise.py in {mode} mode.")
 
-    logging.info(f"Running featurise.py in {args.mode} mode.")
-
-    if args.mode == "training":
+    if mode == "training":
         CURRENT_RAW_DIR = RAW_DIR_BASE / "training"
         CURRENT_FEAT_DIR = FEAT_DIR_BASE
         CI_PARQUET = CURRENT_RAW_DIR / "ci_wind_perc_training.parquet"
@@ -213,9 +203,9 @@ def main() -> None:
     # Check existence based on CURRENT_RAW_DIR
     if not CI_PARQUET.parent.exists() or not MET_PARQUET.parent.exists():
         # A bit more specific error for clarity
-        if args.mode == "training" and not (RAW_DIR_BASE / "training").exists():
+        if mode == "training" and not (RAW_DIR_BASE / "training").exists():
             logging.error(f"Input directory for training data does not exist: {RAW_DIR_BASE / 'training'}")
-        elif args.mode == "inference" and not RAW_DIR_BASE.exists(): # Assuming ci.parquet and openmeteo_weather.parquet are directly in raw for inference
+        elif mode == "inference" and not RAW_DIR_BASE.exists(): # Assuming ci.parquet and openmeteo_weather.parquet are directly in raw for inference
             logging.error(f"Input directory for inference data does not exist: {RAW_DIR_BASE}")
         else:
             logging.error(f"One or both input data parent directories do not exist: {CI_PARQUET.parent}, {MET_PARQUET.parent}")
@@ -239,4 +229,16 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    # argparse lives here, NOT in main(): main() is also called in-process by
+    # pipeline.py, and parsing sys.argv there reads the parent process's
+    # arguments (SystemExit on anything unrecognised, and a pipeline run
+    # started with "--mode training" would silently redirect featurise).
+    parser = argparse.ArgumentParser(description="Featurisation script for wind generation data.")
+    parser.add_argument(
+        "--mode",
+        type=str,
+        default="inference",
+        choices=["training", "inference"],
+        help="Mode of operation: 'training' for full historical data, 'inference' for daily prediction data."
+    )
+    main(parser.parse_args().mode)
