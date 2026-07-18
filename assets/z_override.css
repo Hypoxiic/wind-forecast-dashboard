@@ -1,106 +1,347 @@
 /*  assets/z_override.css
-    ------------------------------------------------------------------
-    Restrained, modern styling for the GB Wind dashboard.
-    Colours are pulled from Bootstrap 5.3 theme variables (--bs-*) so
-    they adapt automatically when ThemeSwitchAIO swaps MINTY <-> CYBORG,
-    instead of the old hard-coded 2px green borders on everything.
+    ══════════════════════════════════════════════════════════════════
+    Design system for the GB Wind dashboard.
+
+    Tokens follow the validated dataviz reference palette:
+      series   — blue (actual) · aqua (persistence) · amber (forecast)
+      chrome   — warm-neutral surfaces, hairline grid, recessive ink
+    Light values live on :root; dark values under [data-theme="dark"],
+    stamped on <html> by a clientside callback tied to the theme switch.
+    Python mirrors these hex values in SERIES_COLORS / CHROME.
 */
 
 :root {
-    --wf-good: #10b981;   /* emerald — model better than baseline */
-    --wf-bad:  #ef4444;   /* red     — model worse                */
-    --wf-warn: #f59e0b;   /* amber   — tie / caution              */
-    --wf-radius: 12px;
-    --wf-shadow: 0 1px 2px rgba(15, 23, 42, 0.04),
-                 0 4px 14px rgba(15, 23, 42, 0.06);
-    --wf-shadow-hover: 0 8px 24px rgba(15, 23, 42, 0.12);
+    /* chrome */
+    --wf-page:      #f9f9f7;
+    --wf-surface:   #fcfcfb;
+    --wf-ink:       #0b0b0b;
+    --wf-ink-2:     #52514e;
+    --wf-muted:     #898781;
+    --wf-grid:      #e1e0d9;
+    --wf-border:    rgba(11, 11, 11, 0.10);
+    /* series */
+    --wf-actual:    #2a78d6;
+    --wf-persist:   #1baf7a;
+    --wf-forecast:  #eda100;
+    /* status (text-grade) */
+    --wf-good:      #006300;
+    --wf-bad:       #d03b3b;
+    --wf-warn:      #b97900;
+    /* shape */
+    --wf-radius:    14px;
+    --wf-radius-sm: 9px;
+    --wf-shadow:    0 1px 2px rgba(15, 23, 42, 0.04), 0 6px 18px rgba(15, 23, 42, 0.05);
+    --wf-shadow-up: 0 10px 28px rgba(15, 23, 42, 0.10);
+    --wf-font:      'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
 }
 
+[data-theme="dark"] {
+    --wf-page:      #0d0d0d;
+    --wf-surface:   #1a1a19;
+    --wf-ink:       #ffffff;
+    --wf-ink-2:     #c3c2b7;
+    --wf-muted:     #898781;
+    --wf-grid:      #2c2c2a;
+    --wf-border:    rgba(255, 255, 255, 0.10);
+    --wf-actual:    #3987e5;
+    --wf-persist:   #199e70;
+    --wf-forecast:  #c98500;
+    --wf-good:      #0ca30c;
+    --wf-bad:       #e66767;
+    --wf-warn:      #fab219;
+    --wf-shadow:    0 1px 2px rgba(0, 0, 0, 0.35), 0 8px 22px rgba(0, 0, 0, 0.35);
+    --wf-shadow-up: 0 12px 30px rgba(0, 0, 0, 0.5);
+}
+
+/* ── Page ─────────────────────────────────────────────────────────── */
 html, body {
-    font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+    font-family: var(--wf-font);
     -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+}
+body {
+    background: var(--wf-page) !important;
+    color: var(--wf-ink);
+    position: relative;
+}
+/* brand accent: a quiet 3px ribbon across the very top */
+body::before {
+    content: "";
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    height: 3px;
+    background: linear-gradient(90deg, var(--wf-actual), var(--wf-persist) 55%, var(--wf-forecast));
+    z-index: 1090;
 }
 
-/* Header */
+/* ── Header ───────────────────────────────────────────────────────── */
+.wf-brand { display: flex; align-items: center; gap: 14px; }
+.wf-logo {
+    width: 42px; height: 42px;
+    border-radius: 12px;
+    background: linear-gradient(135deg, var(--wf-actual), #1c5cab);
+    box-shadow: var(--wf-shadow);
+    padding: 8px;
+}
 .wf-title {
-    font-weight: 700;
-    letter-spacing: -0.02em;
+    font-weight: 800;
+    letter-spacing: -0.03em;
+    font-size: 1.45rem;
+    color: var(--wf-ink);
+    line-height: 1.15;
+}
+.wf-subtitle { color: var(--wf-muted); font-size: 0.82rem; }
+
+/* data-freshness chip with a live pulse dot */
+.wf-chip {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 4px 12px;
+    border: 1px solid var(--wf-border);
+    border-radius: 999px;
+    background: var(--wf-surface);
+    color: var(--wf-ink-2);
+    font-size: 0.78rem;
+    box-shadow: var(--wf-shadow);
+}
+.wf-chip .wf-chip-strong { color: var(--wf-ink); font-weight: 600; }
+.wf-livedot { width: 8px; height: 8px; border-radius: 50%; position: relative; }
+.wf-livedot.ok   { background: #0ca30c; }
+.wf-livedot.old  { background: var(--wf-warn); }
+.wf-livedot.ok::after {
+    content: ""; position: absolute; inset: -4px;
+    border-radius: 50%; border: 2px solid #0ca30c; opacity: 0.5;
+    animation: wf-pulse 2.2s ease-out infinite;
+}
+@keyframes wf-pulse {
+    0% { transform: scale(0.5); opacity: 0.6; }
+    80% { transform: scale(1.4); opacity: 0; }
+    100% { opacity: 0; }
 }
 
-/* Generic cards / panels: soft, themed, no loud borders */
-.card,
-.wf-panel {
-    border: 1px solid var(--bs-border-color) !important;
+/* ── Panels & cards ───────────────────────────────────────────────── */
+.card, .wf-panel {
+    border: 1px solid var(--wf-border) !important;
     border-radius: var(--wf-radius) !important;
+    background: var(--wf-surface) !important;
+    color: var(--wf-ink);
     box-shadow: var(--wf-shadow) !important;
 }
+.wf-panel .card-body { padding: 16px 18px; }
 
-.wf-panel .card-body,
-.wf-panel > .card-body { padding: 16px 18px; }
+/* about-this-forecast disclosure */
+.wf-about summary {
+    cursor: pointer;
+    color: var(--wf-ink-2);
+    font-weight: 600;
+    font-size: 0.86rem;
+    list-style: none;
+}
+.wf-about summary::-webkit-details-marker { display: none; }
+.wf-about summary::before { content: "▸ "; color: var(--wf-muted); }
+.wf-about[open] summary::before { content: "▾ "; }
+.wf-about p { color: var(--wf-ink-2); font-size: 0.85rem; }
 
-/* KPI / metric cards */
+/* ── Metric tiles ─────────────────────────────────────────────────── */
 .wf-metric-card {
-    border: 1px solid var(--bs-border-color) !important;
+    border: 1px solid var(--wf-border) !important;
     border-radius: var(--wf-radius) !important;
+    background: var(--wf-surface) !important;
     box-shadow: var(--wf-shadow) !important;
-    background: var(--bs-body-bg);
-    transition: transform 0.12s ease, box-shadow 0.12s ease;
+    transition: transform 0.14s ease, box-shadow 0.14s ease;
 }
-.wf-metric-card:hover {
-    transform: translateY(-2px);
-    box-shadow: var(--wf-shadow-hover) !important;
-}
+.wf-metric-card:hover { transform: translateY(-2px); box-shadow: var(--wf-shadow-up) !important; }
 .wf-metric-card .card-body { padding: 14px 16px; }
 
 .wf-metric-label {
-    font-size: 0.72rem;
-    font-weight: 600;
+    font-size: 0.68rem;
+    font-weight: 650;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: var(--bs-secondary-color);
-    margin-bottom: 6px;
-    line-height: 1.25;
-    min-height: 2.4em;
+    letter-spacing: 0.05em;
+    color: var(--wf-muted);
+    margin-bottom: 7px;
+    line-height: 1.3;
+    min-height: 2.5em;
 }
 .wf-metric-value {
-    font-size: 1.7rem;
+    font-size: 1.55rem;
     font-weight: 700;
-    line-height: 1.1;
+    line-height: 1.05;
+    color: var(--wf-ink);
+    letter-spacing: -0.01em;
+}
+.wf-metric-unit { font-size: 0.9rem; font-weight: 600; color: var(--wf-muted); margin-left: 2px; }
+
+.wf-delta {
+    display: inline-block;
+    margin-top: 7px;
+    font-size: 0.74rem;
+    font-weight: 650;
+}
+.wf-delta-good { color: var(--wf-good); }
+.wf-delta-bad  { color: var(--wf-bad); }
+.wf-delta-flat { color: var(--wf-muted); }
+
+/* hero tile — the one number the view leads with */
+.wf-hero { position: relative; overflow: hidden; }
+.wf-hero::before {
+    content: "";
+    position: absolute; inset: 0 0 auto 0; height: 3px;
+    background: linear-gradient(90deg, var(--wf-forecast), var(--wf-actual));
+}
+.wf-hero .card-body { padding: 16px 18px; }
+.wf-hero-value {
+    font-size: 3.1rem;
+    font-weight: 800;
+    letter-spacing: -0.03em;
+    line-height: 1;
+    color: var(--wf-ink);
+}
+.wf-hero-unit { font-size: 1rem; font-weight: 600; color: var(--wf-muted); margin-left: 6px; }
+.wf-hero-sub { color: var(--wf-ink-2); font-size: 0.8rem; margin-top: 6px; }
+
+/* ── Tabs ─────────────────────────────────────────────────────────── */
+.nav-tabs { border-bottom: 1px solid var(--wf-border); }
+/* !important + transition:none: bootstrap's .nav-link ships a color
+   transition, and when the theme variables flip during a React re-render the
+   interpolation can freeze at the old value; literal [data-theme] fallbacks
+   below make the final state deterministic either way. */
+.nav-tabs .nav-link {
+    border: none !important;
+    border-bottom: 2px solid transparent !important;
+    color: var(--wf-ink) !important;
+    opacity: 0.55;
+    font-weight: 600;
+    font-size: 0.92rem;
+    padding: 0.55rem 1.1rem;
+    cursor: pointer;
+    background: transparent !important;
+    transition: none !important;
+}
+.nav-tabs .nav-link:hover { opacity: 1; border-bottom-color: var(--wf-grid) !important; }
+.nav-tabs .nav-link.active {
+    color: var(--wf-ink) !important;
+    opacity: 1;
+    background: transparent !important;
+    border-bottom: 2px solid var(--wf-actual) !important;
+    font-weight: 700;
+}
+[data-theme="dark"] .nav-tabs .nav-link { color: #ffffff !important; }
+[data-theme="dark"] .nav-tabs .nav-link.active { border-bottom-color: #3987e5 !important; }
+[data-theme="light"] .nav-tabs .nav-link { color: #0b0b0b !important; }
+[data-theme="light"] .nav-tabs .nav-link.active { border-bottom-color: #2a78d6 !important; }
+
+/* ── Controls ─────────────────────────────────────────────────────── */
+/* date presets as one segmented group */
+.wf-segmented { display: inline-flex; border: 1px solid var(--wf-border); border-radius: 10px; overflow: hidden; box-shadow: var(--wf-shadow); }
+.wf-segmented .btn {
+    border: none !important;
+    border-radius: 0 !important;
+    background: var(--wf-surface) !important;
+    color: var(--wf-ink-2) !important;
+    font-size: 0.8rem;
+    font-weight: 600;
+    padding: 6px 14px;
+    box-shadow: none !important;
+}
+.wf-segmented .btn + .btn { border-left: 1px solid var(--wf-border) !important; }
+.wf-segmented .btn:hover { background: color-mix(in srgb, var(--wf-actual) 10%, var(--wf-surface)) !important; color: var(--wf-ink) !important; }
+
+/* generic small buttons (export) */
+.wf-btn {
+    background: var(--wf-surface) !important;
+    border: 1px solid var(--wf-border) !important;
+    color: var(--wf-ink-2) !important;
+    font-weight: 600;
+    font-size: 0.8rem;
+    border-radius: 10px !important;
+    box-shadow: var(--wf-shadow) !important;
+}
+.wf-btn:hover { color: var(--wf-ink) !important; border-color: var(--wf-actual) !important; }
+
+/* series dropdown + date inputs follow the theme */
+.Select-control, .Select-menu-outer, .Select-value, .Select-input {
+    background: var(--wf-surface) !important;
+    color: var(--wf-ink) !important;
+    border-color: var(--wf-border) !important;
+}
+.Select-menu-outer { border-radius: var(--wf-radius-sm); box-shadow: var(--wf-shadow-up); }
+.Select--multi .Select-value {
+    background: color-mix(in srgb, var(--wf-actual) 12%, var(--wf-surface)) !important;
+    border: 1px solid color-mix(in srgb, var(--wf-actual) 35%, transparent) !important;
+    color: var(--wf-ink) !important;
+    border-radius: 6px !important;
+}
+.Select--multi .Select-value-icon { border-right: 1px solid color-mix(in srgb, var(--wf-actual) 35%, transparent) !important; }
+.VirtualizedSelectOption { background: var(--wf-surface); color: var(--wf-ink); }
+.VirtualizedSelectFocusedOption { background: color-mix(in srgb, var(--wf-actual) 12%, var(--wf-surface)); }
+
+.DateInput, .DateInput_input {
+    background: var(--wf-surface) !important;
+    color: var(--wf-ink) !important;
+    font-family: var(--wf-font) !important;
+    font-size: 0.85rem !important;
+    font-weight: 600;
+}
+.DateRangePickerInput {
+    background: var(--wf-surface) !important;
+    border: 1px solid var(--wf-border) !important;
+    border-radius: 10px !important;
+}
+.DateRangePickerInput_arrow svg { fill: var(--wf-muted) !important; }
+
+/* ── Charts & tables ──────────────────────────────────────────────── */
+.js-plotly-plot { border-radius: var(--wf-radius-sm); overflow: hidden; }
+
+.table {
+    --bs-table-bg: transparent;
+    --bs-table-color: var(--wf-ink);
+    --bs-table-striped-bg: color-mix(in srgb, var(--wf-ink) 3%, transparent);
+    --bs-table-striped-color: var(--wf-ink);
+    --bs-table-hover-bg: color-mix(in srgb, var(--wf-actual) 7%, transparent);
+    --bs-table-hover-color: var(--wf-ink);
+    border-color: var(--wf-border);
+    font-size: 0.83rem;
+}
+.table thead th {
+    font-size: 0.68rem;
+    font-weight: 650;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--wf-muted);
+    border-bottom: 1px solid var(--wf-border);
+}
+.table td:not(:first-child), .table th:not(:first-child) {
+    text-align: right;
     font-variant-numeric: tabular-nums;
 }
 
-/* Tabs: quiet, with an accent underline on the active tab. Inactive tabs
-   still read as clickable (full body colour dimmed, pointer, hover underline)
-   — too-subtle tabs get mistaken for plain labels. */
-.nav-tabs { border-bottom: 1px solid var(--bs-border-color); }
-.nav-tabs .nav-link {
-    border: none;
-    border-bottom: 2px solid transparent;
-    color: var(--bs-body-color);
-    opacity: 0.6;
-    font-weight: 600;
-    padding: 0.5rem 1.1rem;
-    cursor: pointer;
+/* trend chip on the forecast tab */
+.wf-trend {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 5px 12px;
+    border-radius: 999px;
+    border: 1px solid var(--wf-border);
+    background: var(--wf-surface);
+    font-size: 0.8rem; font-weight: 650;
+    box-shadow: var(--wf-shadow);
 }
-.nav-tabs .nav-link:hover {
-    opacity: 1;
-    color: var(--bs-body-color);
-    border-bottom-color: var(--bs-border-color);
-}
-.nav-tabs .nav-link.active {
-    color: var(--bs-body-color);   /* --bs-emphasis-color is black in CYBORG → invisible on dark */
-    opacity: 1;
-    background: transparent;
-    border-bottom: 2px solid var(--wf-good);
-    font-weight: 700;
+.wf-trend.up   { color: var(--wf-good); }
+.wf-trend.down { color: var(--wf-bad); }
+
+/* staleness banner */
+.alert-warning {
+    background: color-mix(in srgb, var(--wf-warn) 12%, var(--wf-surface)) !important;
+    border: 1px solid color-mix(in srgb, var(--wf-warn) 40%, transparent) !important;
+    color: var(--wf-ink) !important;
+    border-radius: var(--wf-radius-sm) !important;
 }
 
-/* Charts sit flush inside rounded cards */
-.js-plotly-plot { border-radius: var(--wf-radius); overflow: hidden; }
+/* loading spinner area keeps its height so the page doesn't jump */
+.wf-loading { min-height: 300px; }
 
-/* Tables inherit the theme background rather than forcing white */
-.table { --bs-table-bg: transparent; }
-.dash-table-container { border-radius: var(--wf-radius); overflow: hidden; }
+/* focus visibility */
+:focus-visible { outline: 2px solid var(--wf-actual); outline-offset: 2px; border-radius: 4px; }
 
-/* Dropdown: match rounded language */
-.Select-control, .is-searchable { border-radius: 8px !important; }
+/* text utility overrides so bootstrap's secondary follows the theme */
+.text-secondary { color: var(--wf-ink-2) !important; }
+.text-muted { color: var(--wf-muted) !important; }
