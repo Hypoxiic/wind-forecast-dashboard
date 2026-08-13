@@ -35,9 +35,13 @@ instead of republishing stale forecasts as a fresh nightly update.
 
 ## Data sources
 - **Carbon Intensity API** — GB wind generation as % of mix (the target).
-- **Open-Meteo** — `temperature_2m`, `wind_speed_10m` for a single hardcoded
-  UK location (54.0°N, −1.5°E). Both archive (training/history) and forecast
-  (next 48h) endpoints are used.
+- **Open-Meteo** — `temperature_2m`, `wind_speed_10m`, `wind_speed_100m`,
+  `wind_gusts_10m`, `wind_direction_10m`, `surface_pressure`, combined into a
+  **capacity-weighted composite of 5 GB wind regions** (Scotland onshore 30%,
+  North Sea 30%, East Anglia 15%, Irish Sea 15%, Moray Firth 10%). Both ETLs
+  carry the identical `WEIGHTED_LOCATIONS` list — keep them in sync. Wind
+  direction uses a circular weighted mean; everything else is linear. Both
+  archive (training/history) and forecast (next 48h) endpoints are used.
 
 ## Artefacts: committed vs gitignored
 **Committed** (despite `.gitignore` patterns — these were tracked before they

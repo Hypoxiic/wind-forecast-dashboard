@@ -79,7 +79,7 @@ A GitHub Actions workflow (`.github/workflows/nightly.yml`) runs at **01:30 UTC*
 
 | Factor                                                  | Contribution                                                  |
 | ------------------------------------------------------- | ------------------------------------------------------------- |
-| **Wind-speed forecast at 10m & 100m (D-1)**             | Turbine power curve → explains ≈ 90 % of wind output variance. 100m sits near real hub height. |
+| **Composite wind-speed forecast at 10m & 100m (D-1)** | Turbine power curve → explains ≈ 90 % of wind output variance. Capacity-weighted across 5 GB wind regions (Scotland, North Sea, East Anglia, Irish Sea, Moray Firth); 100m sits near real hub height. |
 | **Yesterday's observed output (%age)**                  | Autocorrelation + system inertia (percentage reflects mix).   |
 | Engineered extras (v³ proxies at both heights, gust factor, wind direction, pressure tendency, seasonality, holiday flag) | Mop‑up residual bias.                                         |
 
