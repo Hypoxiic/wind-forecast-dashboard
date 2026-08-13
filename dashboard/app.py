@@ -26,6 +26,12 @@ from dash import Dash, Input, Output, State, dcc, html, callback_context, no_upd
 import dash_bootstrap_components as dbc
 import dash_mantine_components as dmc
 from dash_bootstrap_templates import ThemeSwitchAIO
+
+# Mantine 7 needs React 18's useId hook; Dash 2.x defaults to React 16,
+# which fails silently ("r.useId is not a function") and dmc components
+# never mount. Must be set BEFORE the Dash app is created.
+from dash import _dash_renderer
+_dash_renderer._set_react_version("18.2.0")
 from sklearn.metrics import mean_squared_error
 
 # --- Dashboard logger ---
