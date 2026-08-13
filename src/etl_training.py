@@ -13,7 +13,11 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 
 # ── USER CONFIG ─────────────────────────────────────────────────────────────
 TRAIN_START_DATE = date(2017, 9, 27)
-TRAIN_END_DATE   = date(2025, 5, 5)
+# Dynamic end: the model should keep learning from the newest history each
+# retrain, not freeze at a hard-coded date. CI data is near-real-time; the
+# Open-Meteo archive lags ~5 days, so the weather fetch is clamped below.
+TRAIN_END_DATE   = date.today() - timedelta(days=2)
+ARCHIVE_MAX_LAG_DAYS = 5
 
 # For Carbon-Intensity wind percent
 CI_API_BASE_URL   = "https://api.carbonintensity.org.uk"
@@ -24,7 +28,11 @@ CI_CHUNK_DAYS     = 30
 OM_ARCHIVE_URL    = "https://archive-api.open-meteo.com/v1/archive"
 OM_CHUNK_YEARS    = 1
 LAT, LON          = 54.0, -1.5
-HOURLY_VARS       = "temperature_2m,wind_speed_10m"
+# Hub-height wind (100m sits much closer to turbine hub height than 10m;
+# the archive API only exposes 100m, not 80m/120m), gusts, direction and
+# pressure are all free from the same Open-Meteo archive.
+HOURLY_VARS       = ("temperature_2m,wind_speed_10m,wind_speed_100m,"
+                     "wind_gusts_10m,wind_direction_10m,surface_pressure")
 
 # ── PATHS ────────────────────────────────────────────────────────────────────
 DATA_DIR      = Path("data")
@@ -110,11 +118,32 @@ def fetch_weather_historical(start_date: date, end_date: date) -> pd.DataFrame:
 def main():
     start = time.time()
 
-    wind_df  = fetch_ci_wind_perc_historical(TRAIN_START_DATE, TRAIN_END_DATE)
-    wind_df.to_parquet(WIND_OUT_PATH, index=False)
-    logging.info(f"Saved CI wind % → {WIND_OUT_PATH}")
+    # Incremental CI fetch: the raw target history is append-only, so keep the
+    # existing parquet and only request the tail that is missing.
+    ci_start = TRAIN_START_DATE
+    existing_wind = pd.DataFrame()
+    if WIND_OUT_PATH.exists():
+        existing_wind = pd.read_parquet(WIND_OUT_PATH)
+        if not existing_wind.empty:
+            last_ts = pd.to_datetime(existing_wind["datetime"], utc=True).max()
+            ci_start = max(ci_start, last_ts.date() + timedelta(days=1))
+            logging.info(f"Existing CI data through {last_ts}; fetching from {ci_start}")
 
-    met_df   = fetch_weather_historical(TRAIN_START_DATE, TRAIN_END_DATE)
+    if ci_start <= TRAIN_END_DATE:
+        wind_new = fetch_ci_wind_perc_historical(ci_start, TRAIN_END_DATE)
+        wind_df = pd.concat([existing_wind, wind_new], ignore_index=True)
+        wind_df = wind_df.drop_duplicates("datetime").sort_values("datetime").reset_index(drop=True)
+    else:
+        logging.info("CI wind % already up to date.")
+        wind_df = existing_wind
+    wind_df.to_parquet(WIND_OUT_PATH, index=False)
+    logging.info(f"Saved CI wind % → {WIND_OUT_PATH} ({len(wind_df)} rows)")
+
+    # Weather is always a full refetch: the hourly variable set can change
+    # between versions (e.g. hub-height winds added), and partial-schema
+    # merges are messier than a clean re-pull of the archive.
+    met_end = min(TRAIN_END_DATE, date.today() - timedelta(days=ARCHIVE_MAX_LAG_DAYS))
+    met_df   = fetch_weather_historical(TRAIN_START_DATE, met_end)
     met_df.to_parquet(METEO_OUT_PATH, index=False)
     logging.info(f"Saved weather history → {METEO_OUT_PATH}")
 

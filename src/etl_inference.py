@@ -22,7 +22,11 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 
 # ---------------- User‑configurable ---------------------------------------- #
 LAT, LON = 54.0, -1.5  # Example coordinates (Central UK)
-HOURLY_VARS = "temperature_2m,wind_speed_10m" # Weather variables
+# Same variable set as etl_training.py HOURLY_VARS — the inference features
+# must have exactly the columns the model was trained on. Note wind_speed_100m
+# (not 80m/120m): the archive API only exposes 100m.
+HOURLY_VARS = ("temperature_2m,wind_speed_10m,wind_speed_100m,"
+               "wind_gusts_10m,wind_direction_10m,surface_pressure") # Weather variables
 DATA_DIR = Path("data") # Ensure this path is correct relative to execution
 RAW_DIR = DATA_DIR / "raw"
 RAW_DIR.mkdir(parents=True, exist_ok=True)
