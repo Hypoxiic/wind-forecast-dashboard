@@ -1,0 +1,30 @@
+name: Deploy to Render
+
+# Fire the Render deploy hook on every push to main so app/code changes go
+# live without manual steps. The nightly workflow has its own deploy-hook
+# step, so nightly data commits are skipped here to avoid a double deploy.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: render-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # nightly.yml triggers the hook itself after pushing fresh data
+    if: ${{ !startsWith(github.event.head_commit.message, 'Nightly forecast update') }}
+    steps:
+      - name: Trigger Render deploy hook
+        env:
+          RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+        run: |
+          if [ -z "$RENDER_DEPLOY_HOOK_URL" ]; then
+            echo "RENDER_DEPLOY_HOOK_URL secret not set; skipping deploy trigger."
+            exit 0
+          fi
+          curl -sSf -X POST "$RENDER_DEPLOY_HOOK_URL" && echo "Deploy triggered."
