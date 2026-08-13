@@ -534,19 +534,25 @@ series_dd = dcc.Dropdown(
     style={"width": "300px"}
 )
 
-# Mantine range input: clickable month/year header (zoom levels), typed
-# input that commits on Enter/blur — dcc.DatePickerRange (react-dates)
-# offers arrow-only month navigation and no typed-input feedback.
-# The value is a [start, end] pair of ISO date strings.
-date_picker_global = dmc.DatePickerInput(
-    id="date-picker-global",
-    type="range",
-    value=[min_d.isoformat(), max_d.isoformat()],
+# Two single-date Mantine masked inputs (DateInput): real <input> fields that
+# accept typed DD/MM/YYYY committed on Enter/blur with immediate visual
+# feedback. NOTE: Mantine 7's calendar pickers (DatePickerInput) render as
+# buttons and do NOT support typing — that's why these are DateInput.
+date_picker_start = dmc.DateInput(
+    id="date-start",
+    value=min_d.isoformat(),
     minDate=min_d,
     maxDate=max_d,
     valueFormat="DD/MM/YYYY",
-    allowSingleDateInRange=False,
-    w=270,
+    size="sm", w=150, clearable=False,
+)
+date_picker_end = dmc.DateInput(
+    id="date-end",
+    value=max_d.isoformat(),
+    minDate=min_d,
+    maxDate=max_d,
+    valueFormat="DD/MM/YYYY",
+    size="sm", w=150, clearable=False,
 )
 
 # Quick date filters rendered as one segmented control
@@ -626,12 +632,15 @@ app.layout = dbc.Container([
             # forceColorScheme follows the theme switch (see clientside cb).
             dmc.MantineProvider(
                 dbc.Row([
-                    dbc.Col(html.Label("Date Range:", className="pt-2 mb-0"), width="auto"),
-                    dbc.Col(date_picker_global, width="auto"),
-                    dbc.Col(html.Span("Click month/year to jump • type a date and press Enter",
+                    dbc.Col(html.Label("Date Range:", className="mb-0 d-flex align-items-center",
+                                       style={"height": "30px"}), width="auto"),
+                    dbc.Col(date_picker_start, width="auto"),
+                    dbc.Col(html.Span("–", className="text-secondary"), width="auto"),
+                    dbc.Col(date_picker_end, width="auto"),
+                    dbc.Col(html.Span("Type a date + Enter (or use the preset buttons above)",
                                       className="text-secondary small"),
                             className="text-end"),
-                ], align="center"),
+                ], align="center", className="g-2"),
                 id="mantine-provider", forceColorScheme="light",
             )
         ), className="mb-4 wf-panel"),
@@ -651,14 +660,12 @@ app.layout = dbc.Container([
     [Input(ThemeSwitchAIO.ids.switch("theme"),"value"),
      Input("tabs","active_tab"),
      Input("series","value"),
-     Input("date-picker-global", "value")]
+     Input("date-start", "value"),
+     Input("date-end", "value")]
 )
-def render_content(theme_switch_on, active_tab, series_sel, date_range_value):
-    # Mantine range value = [start, end] ISO strings; may be [start, None]
-    # mid-selection — treat incomplete ranges as no constraint.
-    start_d_global = end_d_global = None
-    if isinstance(date_range_value, (list, tuple)) and len(date_range_value) == 2:
-        start_d_global, end_d_global = date_range_value
+def render_content(theme_switch_on, active_tab, series_sel, start_d_global, end_d_global):
+    # Mantine single-date values are ISO strings; either may be None while
+    # the user is mid-edit — treat missing ends as no constraint.
     dash_logger.info(f"--- render_content CALLED: active_tab={active_tab}, series_sel={series_sel}, start_d={start_d_global}, end_d={end_d_global} ---")
     # ThemeSwitchAIO semantics: switch ON (True) selects themes[0], which is
     # the LIGHT stylesheet here — treating True as dark inverts every figure
@@ -937,7 +944,8 @@ def toggle_date_controls(active_tab):
 
 # Add callbacks for date preset buttons
 @app.callback(
-    Output("date-picker-global", "value"),
+    [Output("date-start", "value"),
+     Output("date-end", "value")],
     [Input("btn-last-24h", "n_clicks"),
      Input("btn-last-7d", "n_clicks"),
      Input("btn-last-30d", "n_clicks"),
@@ -947,11 +955,11 @@ def toggle_date_controls(active_tab):
 def update_date_range(last_24h, last_7d, last_30d, all_time):
     ctx = callback_context
     if not ctx.triggered:
-        return no_update
+        return no_update, no_update
 
     button_id = ctx.triggered[0]["prop_id"].split(".")[0]
-    # Clamp presets to the available data range so the picker never receives
-    # dates outside its min/max allowed bounds. Mantine wants ISO strings.
+    # Clamp presets to the available data range so the pickers never receive
+    # dates outside their min/max allowed bounds. Mantine wants ISO strings.
     end = min(pd.Timestamp.today().date(), max_d)
 
     if button_id == "btn-last-24h":
@@ -963,24 +971,22 @@ def update_date_range(last_24h, last_7d, last_30d, all_time):
     elif button_id == "btn-all-time":
         start, end = min_d, max_d
     else:
-        return no_update
+        return no_update, no_update
 
-    return [start.isoformat(), end.isoformat()]
+    return start.isoformat(), end.isoformat()
 
 # Export the currently selected date range as CSV. One global button
 # (always in the layout) drives this, so no suppressed-callback juggling.
 @app.callback(
     Output("download-data", "data"),
     Input("btn-export-main", "n_clicks"),
-    State("date-picker-global", "value"),
+    [State("date-start", "value"),
+     State("date-end", "value")],
     prevent_initial_call=True,
 )
-def export_data(n_main, date_range_value):
+def export_data(n_main, start_d, end_d):
     if not n_main:
         return no_update
-    start_d = end_d = None
-    if isinstance(date_range_value, (list, tuple)) and len(date_range_value) == 2:
-        start_d, end_d = date_range_value
     df = plot_data
     if start_d and end_d:
         df = df[
