@@ -24,6 +24,7 @@ import plotly.graph_objects as go
 import plotly.io as pio
 from dash import Dash, Input, Output, State, dcc, html, callback_context, no_update
 import dash_bootstrap_components as dbc
+import dash_mantine_components as dmc
 from dash_bootstrap_templates import ThemeSwitchAIO
 from sklearn.metrics import mean_squared_error
 
@@ -496,7 +497,7 @@ def make_card(title, value, unit, colour, tooltip=None, delta=None, md=None):
 # defaults to dashboard/assets/ (next to this file), so the custom CSS was
 # never actually served. Point it at the real folder. The Inter stylesheet is
 # a separate link, untouched by ThemeSwitchAIO's theme swapping.
-app    = Dash(__name__, external_stylesheets=[CSS_LIGHT, FONT_CSS],
+app    = Dash(__name__, external_stylesheets=[CSS_LIGHT, FONT_CSS, dmc.styles.DATES],
               suppress_callback_exceptions=True,
               assets_folder=str(ROOT / "assets"))
 server = app.server
@@ -527,13 +528,19 @@ series_dd = dcc.Dropdown(
     style={"width": "300px"}
 )
 
-date_picker_global = dcc.DatePickerRange(
-    id="date-picker-global", 
-    min_date_allowed=min_d, 
-    max_date_allowed=max_d,
-    start_date=min_d,   
-    end_date=max_d,
-    display_format="DD/MM/YYYY",
+# Mantine range input: clickable month/year header (zoom levels), typed
+# input that commits on Enter/blur — dcc.DatePickerRange (react-dates)
+# offers arrow-only month navigation and no typed-input feedback.
+# The value is a [start, end] pair of ISO date strings.
+date_picker_global = dmc.DatePickerInput(
+    id="date-picker-global",
+    type="range",
+    value=[min_d.isoformat(), max_d.isoformat()],
+    minDate=min_d,
+    maxDate=max_d,
+    valueFormat="DD/MM/YYYY",
+    allowSingleDateInRange=False,
+    w=270,
 )
 
 # Quick date filters rendered as one segmented control
@@ -609,18 +616,23 @@ app.layout = dbc.Container([
     html.Div(id="date-controls", children=[
         create_date_preset_buttons(),
         dbc.Card(dbc.CardBody(
-            dbc.Row([
-                dbc.Col(html.Label("Date Range:", className="pt-2 mb-0"), width="auto"),
-                dbc.Col(date_picker_global, width="auto"),
-                dbc.Col(html.Span("Filters the Historical Analysis chart below.",
-                                  className="text-secondary small"),
-                        className="text-end"),
-            ], align="center")
+            # MantineProvider is required around any dmc component;
+            # forceColorScheme follows the theme switch (see clientside cb).
+            dmc.MantineProvider(
+                dbc.Row([
+                    dbc.Col(html.Label("Date Range:", className="pt-2 mb-0"), width="auto"),
+                    dbc.Col(date_picker_global, width="auto"),
+                    dbc.Col(html.Span("Click month/year to jump • type a date and press Enter",
+                                      className="text-secondary small"),
+                            className="text-end"),
+                ], align="center"),
+                id="mantine-provider", forceColorScheme="light",
+            )
         ), className="mb-4 wf-panel"),
     ]),
 
     dcc.Loading(html.Div(id="tab-content"), type="circle", color="#2a78d6",
-                parent_className="wf-loading", delay_show=250),
+                parent_className="wf-loading", delay_show=150),
 
     dcc.Download(id="download-data"),
 
@@ -632,11 +644,15 @@ app.layout = dbc.Container([
      Output("kpi-cards-row", "children")],
     [Input(ThemeSwitchAIO.ids.switch("theme"),"value"),
      Input("tabs","active_tab"),
-     Input("series","value"), 
-     Input("date-picker-global", "start_date"),
-     Input("date-picker-global", "end_date")]
+     Input("series","value"),
+     Input("date-picker-global", "value")]
 )
-def render_content(theme_switch_on, active_tab, series_sel, start_d_global, end_d_global):
+def render_content(theme_switch_on, active_tab, series_sel, date_range_value):
+    # Mantine range value = [start, end] ISO strings; may be [start, None]
+    # mid-selection — treat incomplete ranges as no constraint.
+    start_d_global = end_d_global = None
+    if isinstance(date_range_value, (list, tuple)) and len(date_range_value) == 2:
+        start_d_global, end_d_global = date_range_value
     dash_logger.info(f"--- render_content CALLED: active_tab={active_tab}, series_sel={series_sel}, start_d={start_d_global}, end_d={end_d_global} ---")
     # ThemeSwitchAIO semantics: switch ON (True) selects themes[0], which is
     # the LIGHT stylesheet here — treating True as dark inverts every figure
@@ -766,9 +782,12 @@ def render_content(theme_switch_on, active_tab, series_sel, start_d_global, end_
         tab_specific_content = [fig_forecast_content]
 
     elif active_tab == "historical":
+        # Fall back to the full range while the picker is mid-selection.
+        eff_start = pd.to_datetime(start_d_global).date() if start_d_global else min_d
+        eff_end   = pd.to_datetime(end_d_global).date() if end_d_global else max_d
         df_hist_tab = plot_data[
-            (plot_data.datetime.dt.date >= pd.to_datetime(start_d_global).date()) &
-            (plot_data.datetime.dt.date <= pd.to_datetime(end_d_global).date())
+            (plot_data.datetime.dt.date >= eff_start) &
+            (plot_data.datetime.dt.date <= eff_end)
         ]
 
         # Dynamic KPIs. SMAPE, not MAPE: over a wide range MAPE divides by
@@ -912,8 +931,7 @@ def toggle_date_controls(active_tab):
 
 # Add callbacks for date preset buttons
 @app.callback(
-    [Output("date-picker-global", "start_date"),
-     Output("date-picker-global", "end_date")],
+    Output("date-picker-global", "value"),
     [Input("btn-last-24h", "n_clicks"),
      Input("btn-last-7d", "n_clicks"),
      Input("btn-last-30d", "n_clicks"),
@@ -923,36 +941,40 @@ def toggle_date_controls(active_tab):
 def update_date_range(last_24h, last_7d, last_30d, all_time):
     ctx = callback_context
     if not ctx.triggered:
-        return no_update, no_update
-    
+        return no_update
+
     button_id = ctx.triggered[0]["prop_id"].split(".")[0]
     # Clamp presets to the available data range so the picker never receives
-    # dates outside its min/max allowed bounds.
+    # dates outside its min/max allowed bounds. Mantine wants ISO strings.
     end = min(pd.Timestamp.today().date(), max_d)
 
     if button_id == "btn-last-24h":
-        return max(end - pd.Timedelta(days=1), min_d), end
+        start = max(end - pd.Timedelta(days=1), min_d)
     elif button_id == "btn-last-7d":
-        return max(end - pd.Timedelta(days=7), min_d), end
+        start = max(end - pd.Timedelta(days=7), min_d)
     elif button_id == "btn-last-30d":
-        return max(end - pd.Timedelta(days=30), min_d), end
+        start = max(end - pd.Timedelta(days=30), min_d)
     elif button_id == "btn-all-time":
-        return min_d, max_d
+        start, end = min_d, max_d
+    else:
+        return no_update
 
-    return no_update, no_update
+    return [start.isoformat(), end.isoformat()]
 
 # Export the currently selected date range as CSV. One global button
 # (always in the layout) drives this, so no suppressed-callback juggling.
 @app.callback(
     Output("download-data", "data"),
     Input("btn-export-main", "n_clicks"),
-    [State("date-picker-global", "start_date"),
-     State("date-picker-global", "end_date")],
+    State("date-picker-global", "value"),
     prevent_initial_call=True,
 )
-def export_data(n_main, start_d, end_d):
+def export_data(n_main, date_range_value):
     if not n_main:
         return no_update
+    start_d = end_d = None
+    if isinstance(date_range_value, (list, tuple)) and len(date_range_value) == 2:
+        start_d, end_d = date_range_value
     df = plot_data
     if start_d and end_d:
         df = df[
@@ -962,10 +984,16 @@ def export_data(n_main, start_d, end_d):
     return dcc.send_data_frame(df.to_csv, "wind_forecast_data.csv", index=False)
 
 # Stamp the active theme on <html> so the CSS design tokens follow the switch
-# (ThemeSwitchAIO ON = themes[0] = the light stylesheet).
+# (ThemeSwitchAIO ON = themes[0] = the light stylesheet). The same signal sets
+# the Mantine provider's color scheme so the date picker matches the page.
 app.clientside_callback(
-    "function(on){document.documentElement.setAttribute('data-theme', on ? 'light' : 'dark'); return '';}",
-    Output("theme-anchor", "children"),
+    """function(on){
+        var scheme = on ? 'light' : 'dark';
+        document.documentElement.setAttribute('data-theme', scheme);
+        return ['', scheme];
+    }""",
+    [Output("theme-anchor", "children"),
+     Output("mantine-provider", "forceColorScheme")],
     Input(ThemeSwitchAIO.ids.switch("theme"), "value"),
 )
 

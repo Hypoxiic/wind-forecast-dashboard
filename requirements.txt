@@ -11,6 +11,7 @@ dash>=2.10,<3.0      # Dashboard app
 plotly>=5.10,<6.0     # Dashboard plotting
 dash-bootstrap-components>=1.6,<2.0 # For layout and components
 dash-bootstrap-templates>=1.1.0,<2.0 # For themes and ThemeSwitchAIO 
+dash-mantine-components>=2.0,<3.0  # Date range input with month/year zoom + typed input
 gunicorn
 tenacity>=8.2
 optuna>=3.0,<5.0   # Hyper-parameter search in train_model.py
