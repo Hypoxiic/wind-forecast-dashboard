@@ -141,7 +141,14 @@ def safe_json(path: Path) -> dict:
 
 def load_parquet(path: Path, cols: list[str]) -> pd.DataFrame:
     if path.exists():
-        df = pd.read_parquet(path, columns=cols)
+        # Read everything, then shape to `cols`: files written by older
+        # pipeline versions may lack newer columns (e.g. the P10/P90 band),
+        # and read_parquet(columns=...) raises on a missing column.
+        df = pd.read_parquet(path)
+        for c in cols:
+            if c not in df.columns:
+                df[c] = np.nan
+        df = df[cols]
         df["datetime"] = pd.to_datetime(df["datetime"], utc=True)
         return df
     return pd.DataFrame(columns=cols)
@@ -179,7 +186,9 @@ def style_series_figure(fig, df, series_sel, mode_key, *, end_labels=False,
         tr.name = SERIES_NAMES.get(col, col)
         tr.mode = "lines"
         tr.line.width = 1.6 if dense else 2
-        if not dense:
+        # Spline smoothing is SVG-only: px.line silently upgrades large frames
+        # to Scattergl (WebGL), where shape="spline" is invalid and raises.
+        if not dense and getattr(tr, "type", "scatter") == "scatter":
             tr.line.shape = "spline"
             tr.line.smoothing = 0.55
         tr.hovertemplate = "%{y:.1f}%<extra>" + tr.name + "</extra>"
@@ -223,6 +232,29 @@ def style_series_figure(fig, df, series_sel, mode_key, *, end_labels=False,
 
     fig.update_yaxes(ticksuffix="%", rangemode="tozero", title=None)
     fig.update_xaxes(title=None)
+
+def add_uncertainty_band(fig, df, mode_key):
+    """P10–P90 uncertainty band behind the forecast line, drawn from the
+    quantile-model columns. Traces are appended, then moved to the back so
+    the series lines and end labels stay on top."""
+    if not {"wind_perc_pred_p10", "wind_perc_pred_p90"} <= set(df.columns):
+        return
+    band = df.dropna(subset=["wind_perc_pred_p10", "wind_perc_pred_p90"])
+    if band.empty:
+        return
+    col = SERIES_COLORS[mode_key]["wind_perc_pred"]
+    t_lo = go.Scatter(
+        x=band["datetime"], y=band["wind_perc_pred_p10"], mode="lines",
+        line=dict(width=0), hoverinfo="skip", showlegend=False, name="_p10")
+    t_hi = go.Scatter(
+        x=band["datetime"], y=band["wind_perc_pred_p90"], mode="lines",
+        line=dict(width=0), fill="tonexty", fillcolor=_rgba(col, 0.15),
+        hovertemplate="%{y:.1f}%<extra>P10–P90 range</extra>",
+        name="Forecast range (P10–P90)", showlegend=True)
+    n_before = len(fig.data)
+    fig.add_traces([t_lo, t_hi])
+    data = list(fig.data)
+    fig.data = tuple(data[n_before:] + data[:n_before])
 
 def build_error_figure(error_df, x_min, x_max, mode_key, template):
     """Diverging error panel — warm fill above zero (over-forecast), cool
@@ -351,9 +383,11 @@ if hist_df.empty and FEATURES_PATH.exists():
     logging.warning("history.parquet is empty, attempting to fallback to features.parquet for hist_df")
     hist_df = load_parquet(FEATURES_PATH, ["datetime", "wind_perc", "wind_perc_lag_48h"])
 
-# Load predictions
-latest_preds_df = load_parquet(LATEST_PRED_PATH, ["datetime", "wind_perc_pred"])
-full_hist_preds_df = load_parquet(FULL_HIST_PREDS_PATH, ["datetime", "wind_perc_pred"])
+# Load predictions (P10/P90 band columns are NaN-filled when an older
+# artefact without quantiles is deployed)
+PRED_COLS = ["datetime", "wind_perc_pred", "wind_perc_pred_p10", "wind_perc_pred_p90"]
+latest_preds_df = load_parquet(LATEST_PRED_PATH, PRED_COLS)
+full_hist_preds_df = load_parquet(FULL_HIST_PREDS_PATH, PRED_COLS)
 
 # Consolidate predictions
 if not full_hist_preds_df.empty:
@@ -367,7 +401,7 @@ if not full_hist_preds_df.empty:
 elif not latest_preds_df.empty:
     all_preds_df = latest_preds_df.copy()
 else:
-    all_preds_df = pd.DataFrame(columns=["datetime", "wind_perc_pred"])
+    all_preds_df = pd.DataFrame(columns=PRED_COLS)
     # utc=True: must stay tz-aware or the outer merge with tz-aware hist_df
     # raises at import time and gunicorn workers boot-loop.
     all_preds_df['datetime'] = pd.to_datetime(all_preds_df['datetime'], utc=True)
@@ -397,6 +431,9 @@ if "wind_perc" not in plot_data:
     plot_data["wind_perc"] = np.nan
 if "wind_perc_lag_48h" not in plot_data:
     plot_data["wind_perc_lag_48h"] = np.nan
+for _band_col in ("wind_perc_pred_p10", "wind_perc_pred_p90"):
+    if _band_col not in plot_data:
+        plot_data[_band_col] = np.nan
 
 # Calculate Baseline RMSE and MAPE (using the now comprehensive plot_data for actuals source)
 # but hist_df is still the more reliable source for this specific calculation if available
@@ -656,6 +693,10 @@ def render_content(theme_switch_on, active_tab, series_sel, start_d_global, end_
             )
             style_series_figure(fig_fc, df_forecast_tab, series_sel, mode_key,
                                 end_labels=True, shade_forecast=True, area_actual=True)
+            # Band only where the forecast is selected — it decorates the
+            # prediction line, not the actuals.
+            if "wind_perc_pred" in series_sel:
+                add_uncertainty_band(fig_fc, df_forecast_tab, mode_key)
             fig_fc.update_layout(title_text="Recent actuals & day-ahead forecast",
                                  margin=dict(t=64))
             dash_logger.info(f"Forecast tab: plotting {len(df_forecast_tab)} rows.")
@@ -772,6 +813,8 @@ def render_content(theme_switch_on, active_tab, series_sel, start_d_global, end_
             )
             style_series_figure(fig_hist, df_hist_tab, series_sel, mode_key,
                                 end_labels=span_days <= 45, dense=span_days > 45)
+            if "wind_perc_pred" in series_sel:
+                add_uncertainty_band(fig_hist, df_hist_tab, mode_key)
             fig_hist.update_layout(title_text="Wind share of GB generation — history & model",
                                    margin=dict(t=64))
 
@@ -783,9 +826,52 @@ def render_content(theme_switch_on, active_tab, series_sel, start_d_global, end_
                     figure=build_error_figure(error_df, df_hist_tab.datetime.min(),
                                               df_hist_tab.datetime.max(), mode_key, template),
                     config={"displayModeBar": False})
+
+                # ── Error analytics: distribution + worst days ──
+                hist_fig = px.histogram(
+                    error_df, x="prediction_error", nbins=60, template=template,
+                    color_discrete_sequence=[SERIES_COLORS[mode_key]["wind_perc"]])
+                hist_fig.update_layout(
+                    title=dict(text="Error distribution (%-points)", font=dict(size=13)),
+                    height=190, showlegend=False, bargap=0.05,
+                    margin=dict(t=36, b=28, l=48, r=16),
+                    xaxis=dict(title=None), yaxis=dict(title=None))
+                hist_fig.add_vline(x=0, line_width=1, line_dash="dot",
+                                   line_color=CHROME[mode_key]["muted"])
+                mean_err = float(error_df["prediction_error"].mean())
+                hist_fig.add_vline(x=mean_err, line_width=1,
+                                   line_color=SERIES_COLORS[mode_key]["wind_perc_pred"])
+                hist_fig.add_annotation(
+                    x=mean_err, y=1, yref="paper", yanchor="top", xanchor="left",
+                    xshift=6, yshift=-2, text=f"mean {mean_err:+.1f} pts",
+                    showarrow=False, font=dict(size=11, color=CHROME[mode_key]["ink2"]))
+                error_hist_content = dcc.Graph(figure=hist_fig, config={"displayModeBar": False})
+
+                daily = (error_df.assign(date=error_df["datetime"].dt.date)
+                         .groupby("date")["prediction_error"]
+                         .agg(mean_abs_err=lambda s: s.abs().mean(),
+                              mean_err="mean", n="size")
+                         .reset_index()
+                         .sort_values("mean_abs_err", ascending=False)
+                         .head(8))
+                daily["mean_abs_err"] = daily["mean_abs_err"].round(1)
+                daily["mean_err"] = daily["mean_err"].round(1)
+                worst_days_content = html.Div([
+                    html.H6("Worst-forecast days (selected range)", className="mt-3"),
+                    dbc.Table.from_dataframe(
+                        daily[["date", "mean_abs_err", "mean_err", "n"]].rename(columns={
+                            "date": "Date", "mean_abs_err": "Mean |error| (pts)",
+                            "mean_err": "Mean error (pts)", "n": "Hours"}),
+                        striped=True, hover=True, responsive=True, size="sm"),
+                ])
+                error_analytics = dbc.Row([
+                    dbc.Col(error_hist_content, md=6),
+                    dbc.Col(worst_days_content, md=6),
+                ], className="g-3 mt-1")
             else:
                 error_content = html.Div("No overlapping actuals in the selected range.",
                                          className="text-muted small py-2")
+                error_analytics = None
 
             sample_interval = max(1, len(df_hist_tab) // 8)
             interval_df = df_hist_tab.iloc[::sample_interval].head(8).copy()
@@ -804,6 +890,7 @@ def render_content(theme_switch_on, active_tab, series_sel, start_d_global, end_
             fig_historical_content = html.Div([
                 dcc.Graph(figure=fig_hist, config={"displaylogo": False}),
                 error_content,
+                error_analytics if error_analytics else html.Div(),
                 html.Div([html.H6("Sample data points", className="mt-3"), values_table]),
             ])
 
