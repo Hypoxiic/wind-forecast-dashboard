@@ -110,23 +110,30 @@ hooks on commit. Configuration lives in [pyproject.toml](pyproject.toml).
 ## Gotchas worth knowing
 - The legacy `wind_mw` column is gone from the source tree but still
   appears in old git blame. The current target is `wind_perc` everywhere.
-- [cv_metrics.json](cv_metrics.json) used to report trillion-scale MAPE
-  on folds 2–4 because the unbounded MAPE divides by near-zero
-  `wind_perc` during calm. `validate.py` now uses SMAPE instead. The
-  committed JSON has only the (always-correct) RMSE numbers until the
-  next manual `python src/validate.py` regenerates the SMAPE block.
-- The README roadmap item "error plot for Historical Analysis tab" is
-  already implemented at
-  [dashboard/app.py:736-799](dashboard/app.py#L736-L799).
+- Weather inputs were upgraded (2026-08): both ETLs now fetch
+  `temperature_2m, wind_speed_10m, wind_speed_100m, wind_gusts_10m,
+  wind_direction_10m, surface_pressure`. The Open-Meteo **archive** only
+  exposes `wind_speed_100m` — NOT 80m/120m, which the forecast API does
+  have; mixing them silently yields all-NaN columns. The retrained model
+  (holdout RMSE 1.45, was 1.89) uses hub-height v³ proxies, gust factor,
+  direction sin/cos and 3h pressure tendency.
+- `model.cbm` ships with quantile companions `model_p10.cbm` /
+  `model_p90.cbm` (same hyper-params, `Quantile:alpha=` loss).
+  `predict.py` emits `wind_perc_pred_p10/p90` when they exist and degrades
+  gracefully when they don't; the dashboard NaN-fills missing band columns.
+- Fast retrain: `OPTUNA_TRIALS=0 CATBOOST_DEVICE=CPU python src/train_model.py`
+  reuses `best_params` from [metrics.json](metrics.json) instead of the
+  100-trial search. Full retune still available via `OPTUNA_TRIALS=100`.
+- [cv_metrics.json](cv_metrics.json) was regenerated 2026-08 with the
+  SMAPE block (validate.py uses SMAPE because unbounded MAPE explodes on
+  calm hours). `is_holiday` is now genuinely populated in the shipped
+  model — the constant-0 training column bug is fixed as of the retrain.
+- `tests/test_featurise.py` covers lag alignment, holiday seeding, the
+  power-curve proxies and rolling-window leakage; CI runs it on every push.
 - The Render deploy hook URL was previously committed in plaintext in
   `nightly.yml`. The workflow now reads it from a repo secret, but the
   old URL is still in git history forever — **rotate on Render** if it
   hasn't been done already.
-- `is_holiday` was constant 0 for the model's whole life: `Series.isin()`
-  against a lazily-populated `holidays.UnitedKingdom()` dict returns
-  all-False until the dict is seeded with years. `featurise.py` now seeds
-  it, but the shipped [models/model.cbm](models/model.cbm) was trained on
-  the constant-0 column — **retrain to actually benefit** from the flag.
 - The nightly commit step MUST use `git add -f` for the data/ parquets.
   They are tracked-despite-gitignore, and `git add` of an ignored path
   exits non-zero even for a tracked file (git 2.54), which under the
@@ -134,5 +141,6 @@ hooks on commit. Configuration lives in [pyproject.toml](pyproject.toml).
   from ~2026-05-07 (when the UTF-16 .gitignore was fixed to actually
   ignore data/) until the `-f` fix. That is why the live demo data went
   stale.
-- No automated tests yet. The CI workflow only does compile + import
-  checks. Item 12 of the improvement plan tracks the test backlog.
+- `px.line` auto-upgrades to Scattergl on large frames; Scattergl rejects
+  `line.shape="spline"`. `style_series_figure` only applies spline to
+  real SVG `scatter` traces — don't reintroduce it unconditionally.

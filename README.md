@@ -11,7 +11,8 @@ Live demo -> [https://wind-forecast-dashboard.onrender.com](https://wind-forecas
 ## Dashboard Features
 
 - **Interactive Chart**: Real-time visualization of actual wind generation and model predictions
-- **Error Analysis**: Shows prediction error with a dedicated error panel below the main chart
+- **Uncertainty Band**: P10–P90 forecast range from companion quantile models, shaded around the forecast line
+- **Error Analysis**: Dedicated error panel plus an error-distribution histogram and a worst-forecast-days table on the Historical tab
 - **Data Filtering**: Quick filter buttons (24h, 7d, 30d, All Time) and custom date range selection
 - **Multiple Views**: Forecast & Recent tab (showing recent history + 2 days forecast) and Historical Analysis tab
 - **Performance Metrics**: Clear display of model performance metrics (RMSE, MAPE) vs baseline
@@ -78,11 +79,11 @@ A GitHub Actions workflow (`.github/workflows/nightly.yml`) runs at **01:30 UTC*
 
 | Factor                                                  | Contribution                                                  |
 | ------------------------------------------------------- | ------------------------------------------------------------- |
-| **10 m wind‑speed forecast (D‑1)**                      | Turbine power curve → explains ≈ 90 % of wind output variance. |
+| **Wind-speed forecast at 10m & 100m (D-1)**             | Turbine power curve → explains ≈ 90 % of wind output variance. 100m sits near real hub height. |
 | **Yesterday's observed output (%age)**                  | Autocorrelation + system inertia (percentage reflects mix).   |
-| Engineered extras (v³ proxy, seasonality, holiday flag) | Mop‑up residual bias.                                         |
+| Engineered extras (v³ proxies at both heights, gust factor, wind direction, pressure tendency, seasonality, holiday flag) | Mop‑up residual bias.                                         |
 
-Walk‑forward CV + Optuna tuning + early‑stopping keep the CatBoost model honest.
+Walk‑forward CV + Optuna tuning + early‑stopping keep the CatBoost model honest. Companion P10/P90 quantile models provide the uncertainty band (holdout coverage ≈ 79 %, mean width ≈ 3.6 pts).
 
 ---
 
@@ -99,10 +100,15 @@ python src/etl_training.py
 # 2. Build features for training
 python src/featurise.py --mode training
 
-# 3. Train and validate the model (saves model and CV metrics)
-#    NOTE: train_model.py includes lengthy Optuna tuning.
+# 3. Train and validate the model (saves model, quantile models, and CV metrics)
+#    NOTE: default train_model.py includes lengthy Optuna tuning.
+#    For a fast retrain reusing the stored best params:
+#    OPTUNA_TRIALS=0 CATBOOST_DEVICE=CPU python src/train_model.py
 python src/train_model.py
 python src/validate.py
+
+# --- Tests ---
+python -m pytest tests/ -q
 
 # --- Daily Prediction Pipeline (Simulates nightly run) ---
 # This single script runs the full inference pipeline:
@@ -175,6 +181,10 @@ wind‑forecast‑dashboard/
 * [x] Two-tab dashboard structure (Forecast/Recent, Historical)
 * [x] Implement dynamic KPIs for Historical Analysis tab
 * [x] Implement error plot for Historical Analysis tab
+* [x] Hub-height (100m) wind, gusts, direction & pressure features
+* [x] P10/P90 quantile models + forecast uncertainty band
+* [x] Error analytics (distribution histogram + worst-forecast days)
+* [x] Unit tests for feature engineering (CI-enforced)
 * [ ] Pre‑commit lint/format hooks (ruff, black, isort)
 * [ ] Cloudfront (or Fly io) in front of Render for faster cold‑start
 
