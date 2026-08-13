@@ -86,15 +86,32 @@ def engineer_features(ci: pd.DataFrame, met: pd.DataFrame) -> pd.DataFrame:
     logging.info("Post-merge NaNs:\\n%s", df.isnull().sum().to_string())
 
     # ─── Power curve proxies ──────────
-    # Moved from train_model.py for consistency
+    # v³ captures the turbine power curve below rated speed; the clipped
+    # variant captures saturation above rated. Computed at 10m (legacy) and
+    # at 100m, much closer to real hub heights (archive only exposes 100m).
     RATED_MS = 15.0
-    if "wind_speed_10m" in df.columns:
-        df["wind_speed_v3"]      = df["wind_speed_10m"] ** 3
-        df["wind_speed_v3_clip"] = np.clip(df["wind_speed_10m"], 0, RATED_MS) ** 3
-    else:
-        # Add columns as NaN if base speed column is missing after merge (shouldn't happen ideally)
-        df["wind_speed_v3"] = np.nan
-        df["wind_speed_v3_clip"] = np.nan
+    for height in ("10m", "100m"):
+        col = f"wind_speed_{height}"
+        if col in df.columns:
+            df[f"wind_speed_v3_{height}"]      = df[col] ** 3
+            df[f"wind_speed_v3_clip_{height}"] = np.clip(df[col], 0, RATED_MS) ** 3
+        else:
+            df[f"wind_speed_v3_{height}"] = np.nan
+            df[f"wind_speed_v3_clip_{height}"] = np.nan
+    # Legacy aliases kept so older snapshots/models still read familiar names.
+    df["wind_speed_v3"]      = df["wind_speed_v3_10m"]
+    df["wind_speed_v3_clip"] = df["wind_speed_v3_clip_10m"]
+
+    # ─── Gust / direction / pressure ──
+    if "wind_gusts_10m" in df.columns:
+        # Gust factor: turbulence indicator, helps in rampy conditions.
+        df["gust_factor"] = df["wind_gusts_10m"] / df["wind_speed_10m"].clip(lower=0.5)
+    if "wind_direction_10m" in df.columns:
+        df["sin_wind_dir"] = np.sin(np.deg2rad(df["wind_direction_10m"]))
+        df["cos_wind_dir"] = np.cos(np.deg2rad(df["wind_direction_10m"]))
+    if "surface_pressure" in df.columns:
+        # Pressure level + 3h tendency: synoptic-scale frontal passage signal.
+        df["pressure_delta_3h"] = df["surface_pressure"].diff(3)
 
     # ─── lags ─────────────────────────
     # df is hourly after merge_asof(met, ci, ...)
@@ -114,6 +131,8 @@ def engineer_features(ci: pd.DataFrame, met: pd.DataFrame) -> pd.DataFrame:
     for label, lag_hours in hourly_lag_config.items():
         df[f"wind_perc_lag_{label}"]    = df["wind_perc"].shift(lag_hours)
         df[f"wind_speed_lag_{label}"] = df["wind_speed_10m"].shift(lag_hours)
+        if "wind_speed_100m" in df.columns:
+            df[f"wind_speed_100m_lag_{label}"] = df["wind_speed_100m"].shift(lag_hours)
 
     # ─── rolling stats on wind‑speed ─
     # Window sizes are in HOURLY rows (the data is hourly after merge_asof),
