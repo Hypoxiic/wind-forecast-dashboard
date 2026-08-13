@@ -1,7 +1,9 @@
 {
     "optuna_best_cv_rmse": 1.3737734177858552,
-    "holdout_rmse_perc": 1.8881316561523,
-    "holdout_mape_perc": 0.03831727635041152,
+    "holdout_rmse_perc": 1.4519493997928017,
+    "holdout_mape_perc": 0.04394853362270814,
+    "holdout_band_coverage_p10_p90": 0.7916666666666666,
+    "holdout_band_mean_width_pts": 3.566576359115839,
     "best_params": {
         "bootstrap_type": "Bayesian",
         "iterations": 3545,

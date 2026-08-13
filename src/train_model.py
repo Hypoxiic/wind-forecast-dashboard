@@ -178,22 +178,37 @@ def objective(trial: optuna.Trial) -> float:
 # ──────────────────────────
 # Hyper‑parameter tuning
 # ──────────────────────────
-N_TRIALS = 100
+# OPTUNA_TRIALS=0 skips the search entirely and reuses the best params stored
+# in metrics.json from the previous tuning run — the right choice for a
+# retrain-on-new-data where the search budget has already been spent. Set a
+# positive number to retune from scratch (100 trials ≈ hours on CPU).
+N_TRIALS = int(os.environ.get("OPTUNA_TRIALS", "100"))
 logging.info(f"Optuna study starts – {N_TRIALS} {DEVICE} trials with inner tqdm fold bars.")
-study = optuna.create_study(direction="minimize", study_name="wind_catboost_gpu_tuning")
-study.optimize(objective, n_trials=N_TRIALS, show_progress_bar=True)
+if N_TRIALS > 0:
+    study = optuna.create_study(direction="minimize", study_name="wind_catboost_gpu_tuning")
+    study.optimize(objective, n_trials=N_TRIALS, show_progress_bar=True)
 
-best_params_optuna = study.best_params
-best_value = study.best_value
-logging.info(f"Optuna best CV RMSE: {best_value:.4f}")
-logging.info(f"Best params: {best_params_optuna}")
+    best_params_optuna = study.best_params
+    best_value = study.best_value
+    logging.info(f"Optuna best CV RMSE: {best_value:.4f}")
+    logging.info(f"Best params: {best_params_optuna}")
 
-# Save study (optional)
-try:
-    import joblib
-    joblib.dump(study, STUDY_PATH)
-except Exception as e:
-    logging.warning(f"Could not save Optuna study: {e}")
+    # Save study (optional)
+    try:
+        import joblib
+        joblib.dump(study, STUDY_PATH)
+    except Exception as e:
+        logging.warning(f"Could not save Optuna study: {e}")
+else:
+    if not METRICS_PATH.exists():
+        raise FileNotFoundError(
+            f"OPTUNA_TRIALS=0 but {METRICS_PATH} does not exist — run with tuning at least once."
+        )
+    prev = json.loads(METRICS_PATH.read_text())
+    best_params_optuna = prev["best_params"]
+    best_value = prev.get("optuna_best_cv_rmse", float("nan"))
+    logging.info(f"Reusing best params from {METRICS_PATH} (CV RMSE {best_value:.4f}).")
+    study = None
 
 # ──────────────────────────
 # Prepare final parameters
@@ -236,12 +251,34 @@ logging.info(f"Training final {DEVICE} model on {X_train_full.shape[0]} samples 
 model = CatBoostRegressor(**final_params)
 model.fit(Pool(X_train_full, y_train_full, cat_features=CAT_FEATURES))
 
+# ──────────────────────────
+# Quantile models (P10 / P90) for the dashboard uncertainty band.
+# Same tuned hyper-params; only the loss changes. Quantile crossing is
+# guarded against at prediction time (p90 = max(p50, p90) etc.).
+# ──────────────────────────
+QUANTILES = {"p10": 0.1, "p90": 0.9}
+quantile_models: dict[str, CatBoostRegressor] = {}
+for tag, alpha in QUANTILES.items():
+    q_params = final_params.copy()
+    q_params["loss_function"] = f"Quantile:alpha={alpha}"
+    q_params["eval_metric"] = f"Quantile:alpha={alpha}"
+    logging.info(f"Training {tag} quantile model (alpha={alpha}) …")
+    qm = CatBoostRegressor(**q_params)
+    qm.fit(Pool(X_train_full, y_train_full, cat_features=CAT_FEATURES))
+    qm.save_model(str(MODELS_DIR / f"model_{tag}.cbm"))
+    quantile_models[tag] = qm
+    logging.info(f"Saved {tag} quantile model → {MODELS_DIR / f'model_{tag}.cbm'}")
+
 # -------- save predictions for the *entire* feature set --------
 full_pred_perc = model.predict(X)
+full_pred_p10 = np.minimum(quantile_models["p10"].predict(X), full_pred_perc)
+full_pred_p90 = np.maximum(quantile_models["p90"].predict(X), full_pred_perc)
 
 pd.DataFrame({
     "datetime": df["datetime"],
     "wind_perc_pred": full_pred_perc,
+    "wind_perc_pred_p10": full_pred_p10,
+    "wind_perc_pred_p90": full_pred_p90,
 }).to_parquet(
     MODELS_DIR / "catboost_full.parquet",
     index=False
@@ -252,22 +289,32 @@ pd.DataFrame({
 # Evaluation & artefacts
 # ──────────────────────────
 pred_hold_perc = model.predict(X_holdout)
+pred_hold_p10 = np.minimum(quantile_models["p10"].predict(X_holdout), pred_hold_perc)
+pred_hold_p90 = np.maximum(quantile_models["p90"].predict(X_holdout), pred_hold_perc)
 actual_hold_perc = y_holdout
 
 mse_final  = mean_squared_error(actual_hold_perc, pred_hold_perc)
 rmse_final = mse_final ** 0.5
 mape_final = mean_absolute_percentage_error(actual_hold_perc, pred_hold_perc)
 
+# Uncertainty-band quality on the holdout: coverage should be near 80% and
+# the average width says how informative the band is.
+band_coverage = float(np.mean((actual_hold_perc >= pred_hold_p10) & (actual_hold_perc <= pred_hold_p90)))
+band_mean_width = float(np.mean(pred_hold_p90 - pred_hold_p10))
+
 # Metrics dict update
 metrics = {
-    "optuna_best_cv_rmse": study.best_value,
+    "optuna_best_cv_rmse": best_value,
     "holdout_rmse_perc": rmse_final,
     "holdout_mape_perc": mape_final,
+    "holdout_band_coverage_p10_p90": band_coverage,
+    "holdout_band_mean_width_pts": band_mean_width,
     "best_params": best_params_optuna,
 }
 
 logging.info(f"Holdout RMSE (perc): {rmse_final:.4f}")
 logging.info(f"Holdout MAPE (perc): {mape_final:.4f}")
+logging.info(f"Holdout P10–P90 band: coverage {band_coverage:.3f}, mean width {band_mean_width:.2f} pts")
 
 # Save metrics
 with open(METRICS_PATH, "w") as f:
@@ -279,6 +326,8 @@ holdout_df = pd.DataFrame({
     "datetime": df["datetime"].iloc[-holdout_size:],
     "wind_perc_actual": actual_hold_perc,
     "wind_perc_pred": pred_hold_perc,
+    "wind_perc_pred_p10": pred_hold_p10,
+    "wind_perc_pred_p90": pred_hold_p90,
 })
 holdout_df.to_parquet(
     MODELS_DIR / "catboost_holdout_gpu_final.parquet", index=False
