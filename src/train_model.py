@@ -185,7 +185,18 @@ def objective(trial: optuna.Trial) -> float:
 N_TRIALS = int(os.environ.get("OPTUNA_TRIALS", "100"))
 logging.info(f"Optuna study starts – {N_TRIALS} {DEVICE} trials with inner tqdm fold bars.")
 if N_TRIALS > 0:
-    study = optuna.create_study(direction="minimize", study_name="wind_catboost_gpu_tuning")
+    # Persistent SQLite storage: each invocation ADDS N_TRIALS new trials to
+    # the same study, so long tuning runs can be split into resumable
+    # batches (overnight automation, interrupted shells). Set OPTUNA_STORAGE
+    # to a different URL to start a separate study.
+    storage = os.environ.get("OPTUNA_STORAGE", f"sqlite:///{MODELS_DIR}/optuna_study.db")
+    study = optuna.create_study(
+        direction="minimize",
+        study_name="wind_catboost_tuning",
+        storage=storage,
+        load_if_exists=True,
+    )
+    logging.info(f"Study has {len(study.trials)} existing trials; adding {N_TRIALS}.")
     study.optimize(objective, n_trials=N_TRIALS, show_progress_bar=True)
 
     best_params_optuna = study.best_params
