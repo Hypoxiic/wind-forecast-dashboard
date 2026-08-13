@@ -16,12 +16,21 @@ import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import requests
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 # ---------------- User‑configurable ---------------------------------------- #
-LAT, LON = 54.0, -1.5  # Example coordinates (Central UK)
+# Capacity-weighted sample of GB wind regions — must match etl_training.py
+# WEIGHTED_LOCATIONS exactly (the model is trained on the composite).
+WEIGHTED_LOCATIONS = [
+    (56.3, -4.0, 0.30),   # Scotland onshore
+    (54.5,  1.8, 0.30),   # North Sea offshore (Dogger Bank / Hornsea)
+    (52.6,  2.3, 0.15),   # East Anglia offshore
+    (53.9, -3.6, 0.15),   # Irish Sea offshore
+    (58.0, -2.5, 0.10),   # Moray Firth offshore
+]
 # Same variable set as etl_training.py HOURLY_VARS — the inference features
 # must have exactly the columns the model was trained on. Note wind_speed_100m
 # (not 80m/120m): the archive API only exposes 100m.
@@ -114,21 +123,39 @@ def fetch_ci_wind_perc_history(today: date, days_history: int = 3) -> pd.DataFra
     df = df.sort_values("datetime").reset_index(drop=True)
     return df
 
-# ---------- Open‑Meteo Weather Fetchers (Unchanged from original) ---------- #
-def fetch_weather_history(today: date, days_history: int = 3) -> pd.DataFrame:
-    """Fetches past hourly weather data from Open-Meteo."""
-    start_date = today - timedelta(days=days_history)
-    end_date = today - timedelta(days=1)
-    url = (
-        f"{OM_ARCHIVE_URL}?latitude={LAT}&longitude={LON}"
-        f"&hourly={HOURLY_VARS}&start_date={start_date}&end_date={end_date}&timezone=UTC"
-    )
-    logging.info(f"Fetching past weather from Open-Meteo: {url}")
-    try:
-        js = _make_request(url)
+# ---------- Open‑Meteo Weather Fetchers (weighted multi-location) ---------- #
+def _weighted_combine(frames: list[pd.DataFrame], weights: list[float]) -> pd.DataFrame:
+    """Capacity-weighted composite of per-location hourly frames. Linear
+    variables get a weighted mean; wind direction a circular weighted mean
+    (unit-vector averaging) so 350°/10° doesn't average to 180°. Mirrors
+    etl_training.weighted_combine — keep the two in sync."""
+    base = frames[0][["datetime"]].copy()
+    w_sum = sum(weights)
+    for col in frames[0].columns:
+        if col == "datetime":
+            continue
+        if col == "wind_direction_10m":
+            sin_sum = sum(w * np.sin(np.deg2rad(f[col])) for f, w in zip(frames, weights))
+            cos_sum = sum(w * np.cos(np.deg2rad(f[col])) for f, w in zip(frames, weights))
+            base[col] = (np.rad2deg(np.arctan2(sin_sum / w_sum, cos_sum / w_sum)) + 360) % 360
+        else:
+            base[col] = sum(w * f[col].to_numpy() for f, w in zip(frames, weights)) / w_sum
+    return base
+
+
+def _fetch_weather_all_locations(url: str, start_date: date, end_date: date) -> pd.DataFrame:
+    """Fetch one weather window for every weighted location and combine."""
+    frames, weights = [], []
+    for lat, lon, w in WEIGHTED_LOCATIONS:
+        full_url = (
+            f"{url}?latitude={lat}&longitude={lon}"
+            f"&hourly={HOURLY_VARS}&start_date={start_date}&end_date={end_date}&timezone=UTC"
+        )
+        logging.info(f"Fetching weather: {start_date}→{end_date} @ ({lat},{lon}) [{url.split('/')[2]}]")
+        js = _make_request(full_url)
         if "hourly" not in js or "time" not in js["hourly"]:
-             logging.error(f"Unexpected Open-Meteo response structure: {js}")
-             return pd.DataFrame() # Return empty df
+            logging.error(f"Unexpected Open-Meteo response structure: {js}")
+            continue
         df = pd.DataFrame(js["hourly"])
         df = df.rename(columns={"time": "datetime"})
         df["datetime"] = pd.to_datetime(df["datetime"], utc=True)
@@ -137,7 +164,19 @@ def fetch_weather_history(today: date, days_history: int = 3) -> pd.DataFrame:
         for col in weather_cols:
             if col in df.columns:
                 df[col] = df[col].ffill().bfill()
-        return df
+        frames.append(df)
+        weights.append(w)
+    if not frames:
+        return pd.DataFrame()
+    return _weighted_combine(frames, weights)
+
+
+def fetch_weather_history(today: date, days_history: int = 3) -> pd.DataFrame:
+    """Fetches past hourly weather data from Open-Meteo."""
+    start_date = today - timedelta(days=days_history)
+    end_date = today - timedelta(days=1)
+    try:
+        return _fetch_weather_all_locations(OM_ARCHIVE_URL, start_date, end_date)
     except Exception as e:
         logging.error(f"Failed to fetch past weather: {e}")
         return pd.DataFrame()
@@ -147,25 +186,10 @@ def fetch_weather_forecast(today: date) -> pd.DataFrame:
     """Fetches the next 48 hours of hourly weather forecast from Open-Meteo."""
     start_date = today
     end_date = today + timedelta(days=1) # API includes start and end day
-    url = (
-        f"{OM_FORECAST_URL}?latitude={LAT}&longitude={LON}"
-        f"&hourly={HOURLY_VARS}&start_date={start_date}&end_date={end_date}"
-        "&timezone=UTC"
-    )
-    logging.info(f"Fetching 48h weather forecast from Open-Meteo: {url}")
     try:
-        js = _make_request(url)
-        if "hourly" not in js or "time" not in js["hourly"]:
-             logging.error(f"Unexpected Open-Meteo response structure: {js}")
-             return pd.DataFrame() # Return empty df
-        df = pd.DataFrame(js["hourly"])
-        df = df.rename(columns={"time": "datetime"})
-        df["datetime"] = pd.to_datetime(df["datetime"], utc=True)
-        # Fill NaNs for weather variables
-        weather_cols = HOURLY_VARS.split(',')
-        for col in weather_cols:
-            if col in df.columns:
-                df[col] = df[col].ffill().bfill()
+        df = _fetch_weather_all_locations(OM_FORECAST_URL, start_date, end_date)
+        if df.empty:
+            return df
         # Forecast API might give more than 48h, ensure we only take needed range
         forecast_end_time = pd.Timestamp(f"{end_date} 23:59:59", tz='UTC')
         df = df[df['datetime'] <= forecast_end_time].reset_index(drop=True)

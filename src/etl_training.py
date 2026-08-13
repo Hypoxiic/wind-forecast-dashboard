@@ -7,6 +7,7 @@ import time
 from datetime import date, timedelta
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import requests
 from tenacity import retry, stop_after_attempt, wait_exponential
@@ -27,7 +28,18 @@ CI_CHUNK_DAYS     = 30
 # For Open-Meteo archive
 OM_ARCHIVE_URL    = "https://archive-api.open-meteo.com/v1/archive"
 OM_CHUNK_YEARS    = 1
-LAT, LON          = 54.0, -1.5
+# Capacity-weighted sample of GB wind regions: Scotland onshore, the North
+# Sea (Dogger Bank / Hornsea), East Anglia offshore, the Irish Sea and the
+# Moray Firth. Weights roughly track installed capacity shares. The hourly
+# variables are combined into a single weighted composite below, so the
+# downstream feature pipeline is unchanged.
+WEIGHTED_LOCATIONS = [
+    (56.3, -4.0, 0.30),   # Scotland onshore
+    (54.5,  1.8, 0.30),   # North Sea offshore (Dogger Bank / Hornsea)
+    (52.6,  2.3, 0.15),   # East Anglia offshore
+    (53.9, -3.6, 0.15),   # Irish Sea offshore
+    (58.0, -2.5, 0.10),   # Moray Firth offshore
+]
 # Hub-height wind (100m sits much closer to turbine hub height than 10m;
 # the archive API only exposes 100m, not 80m/120m), gusts, direction and
 # pressure are all free from the same Open-Meteo archive.
@@ -80,29 +92,54 @@ def fetch_ci_wind_perc_historical(start_date: date, end_date: date) -> pd.DataFr
     return df
 
 # ── FETCH OPEN-METEO ARCHIVE ─────────────────────────────────────────────────
+def weighted_combine(frames: list[pd.DataFrame], weights: list[float]) -> pd.DataFrame:
+    """Combine per-location hourly frames into one capacity-weighted composite.
+    Linear variables (speed, gusts, temp, pressure) get a weighted mean;
+    wind direction gets a circular weighted mean (via unit-vector averaging)
+    so a 350°/10° split doesn't average to a meaningless 180°."""
+    base = frames[0][["datetime"]].copy()
+    w_sum = sum(weights)
+    for col in frames[0].columns:
+        if col == "datetime":
+            continue
+        if col == "wind_direction_10m":
+            sin_sum = sum(w * np.sin(np.deg2rad(f[col])) for f, w in zip(frames, weights))
+            cos_sum = sum(w * np.cos(np.deg2rad(f[col])) for f, w in zip(frames, weights))
+            base[col] = (np.rad2deg(np.arctan2(sin_sum / w_sum, cos_sum / w_sum)) + 360) % 360
+        else:
+            base[col] = sum(w * f[col].to_numpy() for f, w in zip(frames, weights)) / w_sum
+    return base
+
+
 def fetch_weather_historical(start_date: date, end_date: date) -> pd.DataFrame:
     parts = []
     cur = start_date
-    logging.info(f"Fetching weather from {start_date} to {end_date}")
+    logging.info(f"Fetching weather from {start_date} to {end_date} "
+                 f"({len(WEIGHTED_LOCATIONS)} weighted locations)")
     while cur <= end_date:
         chunk_end = date(min(cur.year + OM_CHUNK_YEARS - 1, end_date.year), 12, 31)
         chunk_end = min(chunk_end, end_date)
-        params = {
-            "latitude": LAT, "longitude": LON,
-            "hourly": HOURLY_VARS,
-            "start_date": cur.strftime("%Y-%m-%d"),
-            "end_date": chunk_end.strftime("%Y-%m-%d"),
-            "timezone": "UTC",
-        }
-        logging.info(f"  Weather chunk: {cur} → {chunk_end}")
-        try:
-            js = _make_request(OM_ARCHIVE_URL, params=params)
-            hr = js.get("hourly", {})
-            df = pd.DataFrame(hr).rename(columns={"time": "datetime"})
-            df["datetime"] = pd.to_datetime(df["datetime"], utc=True)
-            parts.append(df)
-        except Exception as e:
-            logging.error(f"    Failed weather chunk {cur}–{chunk_end}: {e}")
+        frames, weights = [], []
+        for lat, lon, w in WEIGHTED_LOCATIONS:
+            params = {
+                "latitude": lat, "longitude": lon,
+                "hourly": HOURLY_VARS,
+                "start_date": cur.strftime("%Y-%m-%d"),
+                "end_date": chunk_end.strftime("%Y-%m-%d"),
+                "timezone": "UTC",
+            }
+            logging.info(f"  Weather chunk: {cur} → {chunk_end} @ ({lat},{lon})")
+            try:
+                js = _make_request(OM_ARCHIVE_URL, params=params)
+                hr = js.get("hourly", {})
+                df = pd.DataFrame(hr).rename(columns={"time": "datetime"})
+                df["datetime"] = pd.to_datetime(df["datetime"], utc=True)
+                frames.append(df)
+                weights.append(w)
+            except Exception as e:
+                logging.error(f"    Failed weather chunk {cur}–{chunk_end} @ ({lat},{lon}): {e}")
+        if frames:
+            parts.append(weighted_combine(frames, weights))
         cur = chunk_end + timedelta(days=1)
 
     if not parts:
