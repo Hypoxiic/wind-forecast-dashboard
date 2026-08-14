@@ -1,4 +1,5 @@
 # src/predict.py
+import json
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -9,7 +10,17 @@ FEAT   = Path("data/features/for_predict.parquet")
 MODEL  = Path("models/model.cbm")
 MODEL_P10 = Path("models/model_p10.cbm")
 MODEL_P90 = Path("models/model_p90.cbm")
+METRICS = Path("metrics.json")
 OUTDIR = Path("data/predictions"); OUTDIR.mkdir(parents=True, exist_ok=True)
+
+
+def _conformal_delta() -> float:
+    """Band widening measured on a held-out calibration window at training
+    time. Absent (older artefacts) means no correction."""
+    try:
+        return float(json.loads(METRICS.read_text())["conformal_delta_pts"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return 0.0
 
 def main():
     if not FEAT.exists() or FEAT.stat().st_size == 0:
@@ -35,9 +46,16 @@ def main():
     if MODEL_P10.exists() and MODEL_P90.exists():
         p10 = CatBoostRegressor().load_model(str(MODEL_P10)).predict(pool)
         p90 = CatBoostRegressor().load_model(str(MODEL_P90)).predict(pool)
+        # Split-conformal correction measured at training time. Quantile
+        # regression is not calibrated by construction, so without this the
+        # nominal-80% band lands wherever it lands. A negative delta narrows
+        # an over-wide band; missing metrics.json degrades to the raw band.
+        delta = _conformal_delta()
         # Guard against quantile crossing and the 0–100 share bounds.
-        preds["wind_perc_pred_p10"] = np.clip(np.minimum(p10, preds["wind_perc_pred"]), 0, 100)
-        preds["wind_perc_pred_p90"] = np.clip(np.maximum(p90, preds["wind_perc_pred"]), 0, 100)
+        lo = np.minimum(p10, preds["wind_perc_pred"]) - delta
+        hi = np.maximum(p90, preds["wind_perc_pred"]) + delta
+        preds["wind_perc_pred_p10"] = np.clip(np.minimum(lo, preds["wind_perc_pred"]), 0, 100)
+        preds["wind_perc_pred_p90"] = np.clip(np.maximum(hi, preds["wind_perc_pred"]), 0, 100)
 
     preds.to_parquet(OUTDIR / "latest.parquet", index=False)
 

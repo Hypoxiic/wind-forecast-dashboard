@@ -61,9 +61,43 @@ if df.empty:
     logging.error(f"No data left after dropping NaN from target column '{TARGET}'. Check training_features.parquet.")
     raise ValueError(f"DataFrame empty after dropping NaNs from target '{TARGET}'.")
 
-# Define features (X) and target (y)
-FEATURES = [col for col in df.columns if col not in ["datetime", TARGET]]
+# Define features (X) and target (y).
+# Mirrors train_model.py: wind_perc lags shorter than the forecast horizon are
+# future actuals at issue time. Including them here would report a nowcast's
+# accuracy for a day-ahead product.
+FORECAST_HORIZON_H = 48
+
+def _is_admissible(col: str) -> bool:
+    if not col.startswith("wind_perc_lag_"):
+        return True
+    suffix = col.removeprefix("wind_perc_lag_")
+    if suffix.endswith("h") and suffix[:-1].isdigit():
+        return int(suffix[:-1]) >= FORECAST_HORIZON_H
+    return False
+
+_candidates = [c for c in df.columns if c not in ["datetime", TARGET]]
+FEATURES = [c for c in _candidates if _is_admissible(c)]
+_rejected = sorted(set(_candidates) - set(FEATURES))
+if _rejected:
+    logging.warning("Excluding features inside the %dh horizon: %s",
+                    FORECAST_HORIZON_H, _rejected)
 X, y = df[FEATURES], df[TARGET]
+
+# Score the shipped configuration, not CatBoost's defaults, so cv_metrics.json
+# actually describes the deployed model.
+BEST_PARAMS = {}
+_metrics_path = Path("metrics.json")
+if _metrics_path.exists():
+    try:
+        BEST_PARAMS = dict(json.loads(_metrics_path.read_text()).get("best_params", {}))
+        BEST_PARAMS["learning_rate"] = BEST_PARAMS.pop("lr", None)
+        BEST_PARAMS["l2_leaf_reg"] = BEST_PARAMS.pop("l2", None)
+        BEST_PARAMS = {k: v for k, v in BEST_PARAMS.items() if v is not None}
+        if BEST_PARAMS.get("bootstrap_type") == "Bayesian":
+            BEST_PARAMS.pop("subsample", None)
+        logging.info("Validating with tuned params from metrics.json.")
+    except (OSError, ValueError, TypeError) as e:
+        logging.warning("Could not read best_params (%s); using defaults.", e)
 
 # --- Time Series Cross-Validation ---
 logging.info(f"Starting TimeSeriesSplit CV with {N_SPLITS} splits...")
@@ -88,22 +122,21 @@ for fold, (train_idx, val_idx) in enumerate(tscv.split(X)):
         random_state=42,
         verbose=0,
         eval_metric="RMSE",
-        early_stopping_rounds=EARLY_STOPPING_ROUNDS,
         task_type=DEVICE,
         # Match the production model's categorical declaration
         # (train_model.py CAT_FEATURES) so cv_metrics.json measures the
         # same configuration that ships.
         cat_features=["is_holiday"],
     )
+    cat_kwargs.update(BEST_PARAMS)
     if DEVICE == "GPU":
         cat_kwargs["devices"] = "0"
     model = CatBoostRegressor(**cat_kwargs)
 
-    model.fit(
-        X_train, y_train,
-        eval_set=[(X_val, y_val)],
-        verbose=100 # Show progress within fit
-    )
+    # Deliberately no eval_set / early stopping on X_val: choosing the
+    # iteration count by watching the fold being scored makes the reported
+    # number optimistic. The iteration count comes from the tuned params.
+    model.fit(X_train, y_train, verbose=False)
 
     # Evaluate on validation set
     y_pred = model.predict(X_val)
@@ -113,6 +146,22 @@ for fold, (train_idx, val_idx) in enumerate(tscv.split(X)):
     logging.info(f"Fold {fold+1} SMAPE: {smape:.4f}, RMSE (perc): {rmse:.4f}")
     fold_metrics["smape_perc"].append(smape)
     fold_metrics["rmse_perc"].append(rmse)
+
+    # Reference points on the identical fold. 48h persistence is weak on a
+    # series this autocorrelated; month-hour climatology is the harder,
+    # more honest bar.
+    if "wind_perc_lag_48h" in df.columns:
+        b = df["wind_perc_lag_48h"].iloc[val_idx]
+        m = b.notna().to_numpy()
+        if m.any():
+            fold_metrics["baseline_persistence_rmse"].append(
+                float(mean_squared_error(y_val[m], b[m]) ** 0.5))
+    tr_dt = df["datetime"].iloc[train_idx]
+    clim = y.iloc[train_idx].groupby([tr_dt.dt.month, tr_dt.dt.hour]).mean()
+    va_dt = df["datetime"].iloc[val_idx]
+    clim_pred = [clim.get((d.month, d.hour), y.iloc[train_idx].mean()) for d in va_dt]
+    fold_metrics["baseline_climatology_rmse"].append(
+        float(mean_squared_error(y_val, clim_pred) ** 0.5))
 
     # Store feature importance for this fold
     feature_importances[f'fold_{fold+1}'] = model.get_feature_importance()
@@ -132,9 +181,17 @@ cv_results = {
     "std_smape": std_smape,
     "mean_rmse_perc": mean_rmse,
     "std_rmse_perc": std_rmse,
+    "mean_baseline_persistence_rmse": float(np.mean(fold_metrics["baseline_persistence_rmse"]))
+        if fold_metrics["baseline_persistence_rmse"] else None,
+    "mean_baseline_climatology_rmse": float(np.mean(fold_metrics["baseline_climatology_rmse"]))
+        if fold_metrics["baseline_climatology_rmse"] else None,
+    "forecast_horizon_h": FORECAST_HORIZON_H,
+    "n_features": len(FEATURES),
     "folds": {
         "smape": fold_metrics["smape_perc"],
         "rmse_perc": fold_metrics["rmse_perc"],
+        "baseline_persistence_rmse": fold_metrics["baseline_persistence_rmse"],
+        "baseline_climatology_rmse": fold_metrics["baseline_climatology_rmse"],
     },
 }
 

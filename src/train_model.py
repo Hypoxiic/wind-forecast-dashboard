@@ -81,7 +81,31 @@ if df.empty:
     raise ValueError(f"DataFrame empty after dropping NaNs from target '{TARGET}'.")
 
 CAT_FEATURES  = ["is_holiday"]
-FEATURES      = [c for c in df.columns if c not in {"datetime", TARGET}]
+
+# The published forecast reaches ~48h ahead, so a wind_perc observation is only
+# usable as a feature if it predates the target by at least that much. An
+# earlier version took every column indiscriminately, which pulled in
+# wind_perc_lag_{30m,1h,3h,24h}: available while training, NaN in production.
+# They carried 88% of that model's importance, so the quoted accuracy described
+# a one-hour nowcast rather than the day-ahead forecast actually served.
+# featurise.py no longer emits them; this is the belt-and-braces guard.
+FORECAST_HORIZON_H = 48
+
+def _is_admissible(col: str) -> bool:
+    if not col.startswith("wind_perc_lag_"):
+        return True
+    suffix = col.removeprefix("wind_perc_lag_")
+    if suffix.endswith("h") and suffix[:-1].isdigit():
+        return int(suffix[:-1]) >= FORECAST_HORIZON_H
+    return False          # "30m", "1h" and friends are all inside the horizon
+
+_candidates = [c for c in df.columns if c not in {"datetime", TARGET}]
+FEATURES    = [c for c in _candidates if _is_admissible(c)]
+_rejected   = sorted(set(_candidates) - set(FEATURES))
+if _rejected:
+    logging.warning(
+        "Excluding %d feature(s) inside the %dh forecast horizon: %s",
+        len(_rejected), FORECAST_HORIZON_H, _rejected)
 logging.info(f"Using {len(FEATURES)} features.")
 
 X = df[FEATURES]
@@ -91,10 +115,36 @@ y = df[TARGET]
 # Walk‑forward CV
 # ──────────────────────────
 N_SPLITS  = 5
-TEST_SIZE = 24 * 2  # 48 half‑hours (24 h)
+# 30 days of hourly rows per fold. This was 48 rows (two days) — far too few
+# for a stable estimate on a series this seasonal, and it made the quoted
+# hold-out number swing between retrains.
+TEST_SIZE = 24 * 30
+# Windows carved off the end for honest reporting: the model never sees the
+# hold-out, and the conformal delta is measured on data the quantile models
+# were not fitted on.
+HOLDOUT_HOURS = 24 * 30
+CALIB_HOURS   = 24 * 60
+
+# Chronological split, defined before tuning so the search never sees them.
+# `fit` trains, `calib` sizes the conformal correction, `holdout` is touched by
+# neither and is what the reported metrics describe.
+n_rows     = len(X)
+holdout_lo = n_rows - HOLDOUT_HOURS
+calib_lo   = holdout_lo - CALIB_HOURS
+if calib_lo <= TEST_SIZE * N_SPLITS:
+    raise ValueError(
+        f"Not enough rows ({n_rows}) for {N_SPLITS} CV folds of {TEST_SIZE} "
+        f"plus a {CALIB_HOURS}h calibration and {HOLDOUT_HOURS}h hold-out.")
+
+# Optuna tunes on everything BEFORE the calibration window. Letting the search
+# score folds that overlap the hold-out would pick hyper-parameters with the
+# hold-out visible, which is exactly the kind of quiet optimism this rewrite
+# exists to remove.
+X_tune, y_tune = X.iloc[:calib_lo], y.iloc[:calib_lo]
 
 tscv = TimeSeriesSplit(n_splits=N_SPLITS, test_size=TEST_SIZE, gap=0)
-logging.info(f"Using TimeSeriesSplit with {N_SPLITS} splits, test_size={TEST_SIZE}.")
+logging.info(f"Using TimeSeriesSplit with {N_SPLITS} splits, test_size={TEST_SIZE}, "
+             f"over the first {len(X_tune)} of {n_rows} rows.")
 
 # ──────────────────────────
 # Optuna objective
@@ -115,8 +165,11 @@ def objective(trial: optuna.Trial) -> float:
         # Row‑sampling (GPU‑compatible). NOT allowed with Bayesian bootstrap.
         "subsample":     trial.suggest_float("subsample", 0.6, 1.0),
 
-        # Other knobs
-        "boosting_type":   trial.suggest_categorical("boosting_type", ["Ordered", "Plain"]),
+        # Other knobs.
+        # boosting_type is fixed to Plain: Ordered boosting costs ~10x the
+        # wall-clock per fold on this dataset and lost every probe against
+        # Plain, so searching it just burns the trial budget.
+        "boosting_type":   "Plain",
         "bootstrap_type":  bootstrap_type,
         "random_strength": trial.suggest_float("random_strength", 1e-8, 10.0, log=True),
         "border_count":    trial.suggest_int("border_count", 32, 255),
@@ -137,17 +190,17 @@ def objective(trial: optuna.Trial) -> float:
 
     rmses = []
     fold_iter = tqdm(
-        tscv.split(X),
+        tscv.split(X_tune),
         total=N_SPLITS,
         desc=f"Trial {trial.number:03d}",
         leave=False,
     )
     for fold, (train_idx, test_idx) in enumerate(fold_iter):
         train_pool = Pool(
-            X.iloc[train_idx], y.iloc[train_idx], cat_features=CAT_FEATURES
+            X_tune.iloc[train_idx], y_tune.iloc[train_idx], cat_features=CAT_FEATURES
         )
         valid_pool = Pool(
-            X.iloc[test_idx], y.iloc[test_idx], cat_features=CAT_FEATURES
+            X_tune.iloc[test_idx], y_tune.iloc[test_idx], cat_features=CAT_FEATURES
         )
 
         try:
@@ -165,9 +218,9 @@ def objective(trial: optuna.Trial) -> float:
             logging.error(f"Trial failed (fold {fold + 1}): {e}")
             return float("inf")
 
-        pred_perc = model.predict(X.iloc[test_idx]) # <-- RENAMED pred_cf to pred_perc
+        pred_perc = model.predict(X_tune.iloc[test_idx])
         mse  = mean_squared_error(
-            y.iloc[test_idx], pred_perc
+            y_tune.iloc[test_idx], pred_perc
         )
         rmse = mse ** 0.5
         rmses.append(rmse)
@@ -254,91 +307,132 @@ if "iterations" not in final_params:
 # ──────────────────────────
 # Final training
 # ──────────────────────────
-holdout_size = TEST_SIZE
-X_train_full, y_train_full = X.iloc[:-holdout_size], y.iloc[:-holdout_size]
-X_holdout, y_holdout       = X.iloc[-holdout_size:], y.iloc[-holdout_size:]
+X_fit,  y_fit  = X.iloc[:calib_lo],            y.iloc[:calib_lo]
+X_cal,  y_cal  = X.iloc[calib_lo:holdout_lo],  y.iloc[calib_lo:holdout_lo]
+X_hold, y_hold = X.iloc[holdout_lo:],          y.iloc[holdout_lo:]
+logging.info("Split: fit=%d  calib=%d  holdout=%d rows", len(X_fit), len(X_cal), len(X_hold))
 
-logging.info(f"Training final {DEVICE} model on {X_train_full.shape[0]} samples …")
-model = CatBoostRegressor(**final_params)
-model.fit(Pool(X_train_full, y_train_full, cat_features=CAT_FEATURES))
-
-# ──────────────────────────
-# Quantile models (P10 / P90) for the dashboard uncertainty band.
-# Same tuned hyper-params; only the loss changes. Quantile crossing is
-# guarded against at prediction time (p90 = max(p50, p90) etc.).
-# ──────────────────────────
 QUANTILES = {"p10": 0.1, "p90": 0.9}
-quantile_models: dict[str, CatBoostRegressor] = {}
-for tag, alpha in QUANTILES.items():
-    q_params = final_params.copy()
-    q_params["loss_function"] = f"Quantile:alpha={alpha}"
-    q_params["eval_metric"] = f"Quantile:alpha={alpha}"
-    logging.info(f"Training {tag} quantile model (alpha={alpha}) …")
-    qm = CatBoostRegressor(**q_params)
-    qm.fit(Pool(X_train_full, y_train_full, cat_features=CAT_FEATURES))
+
+def _fit_point(Xt, yt):
+    m = CatBoostRegressor(**final_params)
+    m.fit(Pool(Xt, yt, cat_features=CAT_FEATURES))
+    return m
+
+def _fit_quantiles(Xt, yt):
+    out = {}
+    for tag, alpha in QUANTILES.items():
+        q = final_params.copy()
+        q["loss_function"] = f"Quantile:alpha={alpha}"
+        q["eval_metric"]   = f"Quantile:alpha={alpha}"
+        logging.info(f"Training {tag} quantile model (alpha={alpha}) …")
+        m = CatBoostRegressor(**q)
+        m.fit(Pool(Xt, yt, cat_features=CAT_FEATURES))
+        out[tag] = m
+    return out
+
+# ── Stage 1: evaluation models, fitted without calib/holdout ──────────────
+logging.info(f"Training evaluation model on {len(X_fit)} samples …")
+eval_model = _fit_point(X_fit, y_fit)
+eval_qs    = _fit_quantiles(X_fit, y_fit)
+
+# ── Conformal calibration ─────────────────────────────────────────────────
+# Quantile regression is not calibrated by construction: the P10/P90 pair
+# routinely misses its nominal 80%. Split-conformal fixes that distribution-
+# free — take the empirical (1-alpha) quantile of the conformity score
+# max(lo - y, y - hi) on data the models never saw, then widen both bounds by
+# it. A negative delta means the raw band was too wide and gets narrowed.
+NOMINAL_COVERAGE = 0.80
+cal_lo = eval_qs["p10"].predict(X_cal)
+cal_hi = eval_qs["p90"].predict(X_cal)
+conformal_delta = float(np.quantile(
+    np.maximum(cal_lo - y_cal.values, y_cal.values - cal_hi), NOMINAL_COVERAGE))
+logging.info("Conformal delta on %d calibration rows: %+.3f pts",
+             len(X_cal), conformal_delta)
+
+def _band(qs, Xt, point):
+    lo = np.minimum(qs["p10"].predict(Xt), point)
+    hi = np.maximum(qs["p90"].predict(Xt), point)
+    return (np.clip(lo - conformal_delta, 0, 100),
+            np.clip(hi + conformal_delta, 0, 100))
+
+# ── Hold-out evaluation (the honest numbers) ──────────────────────────────
+pred_hold = np.clip(eval_model.predict(X_hold), 0, 100)
+raw_lo = np.minimum(eval_qs["p10"].predict(X_hold), pred_hold)
+raw_hi = np.maximum(eval_qs["p90"].predict(X_hold), pred_hold)
+cal_lo_h, cal_hi_h = _band(eval_qs, X_hold, pred_hold)
+
+rmse_final = float(np.sqrt(mean_squared_error(y_hold, pred_hold)))
+mape_final = float(mean_absolute_percentage_error(y_hold, pred_hold))
+baseline_col = "wind_perc_lag_48h"
+baseline_rmse = (
+    float(np.sqrt(mean_squared_error(
+        y_hold[df[baseline_col].iloc[holdout_lo:].notna().values],
+        df[baseline_col].iloc[holdout_lo:].dropna())))
+    if baseline_col in df.columns else float("nan"))
+
+cov_raw = float(np.mean((y_hold >= raw_lo)   & (y_hold <= raw_hi)))
+cov_cal = float(np.mean((y_hold >= cal_lo_h) & (y_hold <= cal_hi_h)))
+width_raw = float(np.mean(raw_hi - raw_lo))
+width_cal = float(np.mean(cal_hi_h - cal_lo_h))
+
+logging.info(f"Hold-out RMSE: {rmse_final:.4f} pts  (48h-persistence {baseline_rmse:.2f})")
+logging.info(f"Band coverage raw {cov_raw:.3f} -> conformal {cov_cal:.3f} "
+             f"(nominal {NOMINAL_COVERAGE}); width {width_raw:.2f} -> {width_cal:.2f} pts")
+
+# ── Stage 2: production models, refitted on everything ────────────────────
+# The delta measured above is carried over: it is an estimate of this model
+# family's miscalibration, and refitting on the extra 90 days does not
+# meaningfully change that while it does help the capacity trend stay current.
+logging.info(f"Refitting production models on all {n_rows} samples …")
+model = _fit_point(X, y)
+quantile_models = _fit_quantiles(X, y)
+for tag, qm in quantile_models.items():
     qm.save_model(str(MODELS_DIR / f"model_{tag}.cbm"))
-    quantile_models[tag] = qm
     logging.info(f"Saved {tag} quantile model → {MODELS_DIR / f'model_{tag}.cbm'}")
 
 # -------- save predictions for the *entire* feature set --------
-full_pred_perc = model.predict(X)
-full_pred_p10 = np.minimum(quantile_models["p10"].predict(X), full_pred_perc)
-full_pred_p90 = np.maximum(quantile_models["p90"].predict(X), full_pred_perc)
-
+full_pred_perc = np.clip(model.predict(X), 0, 100)
+full_p10, full_p90 = _band(quantile_models, X, full_pred_perc)
 pd.DataFrame({
     "datetime": df["datetime"],
     "wind_perc_pred": full_pred_perc,
-    "wind_perc_pred_p10": full_pred_p10,
-    "wind_perc_pred_p90": full_pred_p90,
-}).to_parquet(
-    MODELS_DIR / "catboost_full.parquet",
-    index=False
-)
-
+    "wind_perc_pred_p10": full_p10,
+    "wind_perc_pred_p90": full_p90,
+}).to_parquet(MODELS_DIR / "catboost_full.parquet", index=False)
 
 # ──────────────────────────
 # Evaluation & artefacts
 # ──────────────────────────
-pred_hold_perc = model.predict(X_holdout)
-pred_hold_p10 = np.minimum(quantile_models["p10"].predict(X_holdout), pred_hold_perc)
-pred_hold_p90 = np.maximum(quantile_models["p90"].predict(X_holdout), pred_hold_perc)
-actual_hold_perc = y_holdout
-
-mse_final  = mean_squared_error(actual_hold_perc, pred_hold_perc)
-rmse_final = mse_final ** 0.5
-mape_final = mean_absolute_percentage_error(actual_hold_perc, pred_hold_perc)
-
-# Uncertainty-band quality on the holdout: coverage should be near 80% and
-# the average width says how informative the band is.
-band_coverage = float(np.mean((actual_hold_perc >= pred_hold_p10) & (actual_hold_perc <= pred_hold_p90)))
-band_mean_width = float(np.mean(pred_hold_p90 - pred_hold_p10))
-
-# Metrics dict update
 metrics = {
     "optuna_best_cv_rmse": best_value,
+    "holdout_days": HOLDOUT_HOURS // 24,
     "holdout_rmse_perc": rmse_final,
     "holdout_mape_perc": mape_final,
-    "holdout_band_coverage_p10_p90": band_coverage,
-    "holdout_band_mean_width_pts": band_mean_width,
+    "holdout_baseline_rmse_perc": baseline_rmse,
+    "holdout_band_coverage_p10_p90": cov_cal,
+    "holdout_band_coverage_uncalibrated": cov_raw,
+    "holdout_band_mean_width_pts": width_cal,
+    "conformal_delta_pts": conformal_delta,
+    "conformal_nominal_coverage": NOMINAL_COVERAGE,
+    "n_features": len(FEATURES),
+    "features": FEATURES,
     "best_params": best_params_optuna,
 }
 
-logging.info(f"Holdout RMSE (perc): {rmse_final:.4f}")
-logging.info(f"Holdout MAPE (perc): {mape_final:.4f}")
-logging.info(f"Holdout P10–P90 band: coverage {band_coverage:.3f}, mean width {band_mean_width:.2f} pts")
-
-# Save metrics
 with open(METRICS_PATH, "w") as f:
     json.dump(metrics, f, indent=4)
 logging.info(f"Saved metrics → {METRICS_PATH}")
 
 # Save holdout predictions
+# These come from the evaluation model (never fitted on the hold-out), so the
+# file stays a fair record of out-of-sample behaviour.
 holdout_df = pd.DataFrame({
-    "datetime": df["datetime"].iloc[-holdout_size:],
-    "wind_perc_actual": actual_hold_perc,
-    "wind_perc_pred": pred_hold_perc,
-    "wind_perc_pred_p10": pred_hold_p10,
-    "wind_perc_pred_p90": pred_hold_p90,
+    "datetime": df["datetime"].iloc[holdout_lo:],
+    "wind_perc_actual": y_hold.values,
+    "wind_perc_pred": pred_hold,
+    "wind_perc_pred_p10": cal_lo_h,
+    "wind_perc_pred_p90": cal_hi_h,
 })
 holdout_df.to_parquet(
     MODELS_DIR / "catboost_holdout_gpu_final.parquet", index=False
