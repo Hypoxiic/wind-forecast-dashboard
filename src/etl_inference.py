@@ -70,7 +70,15 @@ def _make_request(url: str, params: dict | None = None, headers: dict | None = N
         raise # Re-raise exception to trigger tenacity retry
 
 # ---------- Carbon‑Intensity Wind Percentage (Yesterday) ------------------- #
-def fetch_ci_wind_perc_history(today: date, days_history: int = 3) -> pd.DataFrame:
+# 14 days, not 3: the model's strongest features are trailing windows over
+# wind_perc, so a hole in history.parquet degrades the live forecast. A
+# fortnight of overlap means any gap shorter than that heals itself on the
+# next successful run instead of persisting forever. Use
+# src/backfill_history.py for anything longer.
+CI_HISTORY_DAYS = 14
+
+def fetch_ci_wind_perc_history(today: date,
+                               days_history: int = CI_HISTORY_DAYS) -> pd.DataFrame:
     """
     Fetches wind generation percentage for the specified number of past days up to and including today.
     """
