@@ -16,8 +16,11 @@ jobs:
     steps:
       - name: Ping the dashboard
         run: |
+          # `run:` blocks execute under `bash -e`, so a non-zero curl (e.g. 28,
+          # timeout, which happens whenever Render is mid-redeploy) aborts the
+          # step before the `exit 0` below is ever reached. Swallow it here.
           code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 90 \
-            https://wind-forecast-dashboard.onrender.com/)
+            https://wind-forecast-dashboard.onrender.com/ || echo "000")
           echo "HTTP $code"
           # 2xx/3xx = warm; anything else still counts as a wake-up attempt
           exit 0
