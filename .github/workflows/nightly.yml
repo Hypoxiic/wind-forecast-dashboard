@@ -30,7 +30,9 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install -r requirements.txt
+          # -r pulls in requirements.txt; the nightly runs src/predict.py,
+          # which loads the CatBoost model.
+          pip install -r requirements-train.txt
           sudo apt-get update && sudo apt-get install -y libgomp1   # CatBoost needs OpenMP
 
       - name: Run nightly pipeline

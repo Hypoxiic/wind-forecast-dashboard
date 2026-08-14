@@ -32,7 +32,6 @@ from dash_bootstrap_templates import ThemeSwitchAIO
 # never mount. Must be set BEFORE the Dash app is created.
 from dash import _dash_renderer
 _dash_renderer._set_react_version("18.2.0")
-from sklearn.metrics import mean_squared_error
 
 # --- Dashboard logger ---
 # Logs to stderr by default (captured by gunicorn/Render). Set
@@ -163,6 +162,12 @@ def load_parquet(path: Path, cols: list[str]) -> pd.DataFrame:
 def fmt_metric(val, fmt: str = "{:.2f}") -> str:
     """Format a metric for display, showing N/A instead of literal 'nan'."""
     return fmt.format(val) if not np.isnan(val) else "N/A"
+
+def rmse(y_true, y_pred) -> float:
+    """Root mean squared error. Was sklearn.metrics.mean_squared_error,
+    which pulled ~100 MB of scikit-learn into the web service for one line."""
+    err = np.asarray(y_true, dtype=float) - np.asarray(y_pred, dtype=float)
+    return float(np.sqrt(np.mean(err ** 2)))
 
 def smape(y_true, y_pred) -> float:
     """Symmetric MAPE as a 0–2 fraction. Plain MAPE divides by wind_perc,
@@ -475,8 +480,7 @@ if not actuals_for_baseline_calc.empty:
         (hist_df.datetime <= latest_actual_date)
     ].dropna(subset=["wind_perc", "wind_perc_lag_48h"])
     if not sub.empty and len(sub) > 1:
-        mse_val        = mean_squared_error(sub.wind_perc, sub.wind_perc_lag_48h)
-        baseline_rmse  = np.sqrt(mse_val)
+        baseline_rmse  = rmse(sub.wind_perc, sub.wind_perc_lag_48h)
         baseline_mape  = smape(sub.wind_perc, sub.wind_perc_lag_48h)
     else:
         baseline_rmse = baseline_mape = np.nan
@@ -833,11 +837,11 @@ def render_content(theme_switch_on, active_tab, series_sel, start_d_global, end_
         dyn_baseline_rmse, dyn_baseline_mape = np.nan, np.nan
         df_eval_model = df_hist_tab.dropna(subset=["wind_perc", "wind_perc_pred"])
         if len(df_eval_model) > 1:
-            dyn_cat_rmse = np.sqrt(mean_squared_error(df_eval_model.wind_perc, df_eval_model.wind_perc_pred))
+            dyn_cat_rmse = rmse(df_eval_model.wind_perc, df_eval_model.wind_perc_pred)
             dyn_cat_mape = smape(df_eval_model.wind_perc, df_eval_model.wind_perc_pred)
         df_eval_baseline = df_hist_tab.dropna(subset=["wind_perc", "wind_perc_lag_48h"])
         if len(df_eval_baseline) > 1:
-            dyn_baseline_rmse = np.sqrt(mean_squared_error(df_eval_baseline.wind_perc, df_eval_baseline.wind_perc_lag_48h))
+            dyn_baseline_rmse = rmse(df_eval_baseline.wind_perc, df_eval_baseline.wind_perc_lag_48h)
             dyn_baseline_mape = smape(df_eval_baseline.wind_perc, df_eval_baseline.wind_perc_lag_48h)
 
         dyn_cat_rmse_col, dyn_cat_rmse_ic = delta_colour(dyn_cat_rmse, dyn_baseline_rmse)

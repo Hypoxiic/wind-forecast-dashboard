@@ -1,0 +1,13 @@
+# requirements-train.txt — training + inference-model deps.
+#
+# Everything in the runtime set, plus the heavy modelling stack. Install this
+# (not requirements.txt) for training, for CI, and for the nightly job, which
+# needs catboost to run src/predict.py. The Render web service must NOT
+# install this file.
+
+-r requirements.txt
+
+catboost>=1.0,<2.0     # Model
+scikit-learn>=1.0,<2.0 # TimeSeriesSplit + metrics in train_model.py / validate.py
+optuna>=3.0,<5.0       # Hyper-parameter search in train_model.py
+tqdm>=4.60             # Progress bars in train_model.py

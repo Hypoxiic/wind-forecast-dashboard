@@ -10,19 +10,24 @@ dependencies = [
     "requests>=2.20,<3.0",
     "pyarrow>=10.0,<17.0",
     "holidays>=0.40,<1.0",
-    "scikit-learn>=1.0,<2.0",
-    "catboost>=1.0,<2.0",
     "dash>=2.10,<3.0",
     "plotly>=5.10,<6.0",
     "dash-bootstrap-components>=1.6,<2.0",
     "dash-bootstrap-templates>=1.1.0,<2.0",
     "gunicorn",
+    "flask-compress>=1.14",
     "tenacity>=8.2",
-    "optuna>=3.0,<5.0",
-    "tqdm>=4.60",
 ]
 
 [project.optional-dependencies]
+# The modelling stack. Not installed on the Render web service — see
+# requirements-train.txt, which is the file CI and the nightly job use.
+train = [
+    "catboost>=1.0,<2.0",
+    "scikit-learn>=1.0,<2.0",
+    "optuna>=3.0,<5.0",
+    "tqdm>=4.60",
+]
 dev = [
     "ruff>=0.5,<1.0",
     "black>=24.0",

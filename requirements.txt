@@ -1,19 +1,22 @@
-# requirements.txt
+# requirements.txt — runtime deps.
+#
+# Installed by the Render web service AND by the nightly inference job.
+# Training-only packages (catboost, scikit-learn, optuna, tqdm) live in
+# requirements-train.txt: they add >150 MB to the image, and the free tier
+# only has 512 MB of RAM and pays the install cost on every cold start.
+# Anything needed to *train* goes there; anything needed to *serve* or to
+# run the nightly ETL goes here.
 
 pandas>=2.0,<3.0
 numpy>=1.20,<2.0
 requests>=2.20,<3.0
 pyarrow>=10.0,<17.0   # For parquet read/write
 holidays>=0.40,<1.0  # For UK holidays feature
-scikit-learn>=1.0,<2.0 # For metrics
-catboost>=1.0,<2.0   # Model
+tenacity>=8.2
 dash>=2.10,<3.0      # Dashboard app
 plotly>=5.10,<6.0     # Dashboard plotting
 dash-bootstrap-components>=1.6,<2.0 # For layout and components
-dash-bootstrap-templates>=1.1.0,<2.0 # For themes and ThemeSwitchAIO 
+dash-bootstrap-templates>=1.1.0,<2.0 # For themes and ThemeSwitchAIO
 dash-mantine-components>=2.0,<3.0  # Date range input with month/year zoom + typed input
 gunicorn
 flask-compress>=1.14  # Dash 2.18 defaults compress=False; without this nothing is gzipped
-tenacity>=8.2
-optuna>=3.0,<5.0   # Hyper-parameter search in train_model.py
-tqdm>=4.60         # Progress bars in train_model.py

@@ -22,11 +22,15 @@ jobs:
         with:
           python-version: '3.11'
           cache: pip
-          cache-dependency-path: requirements.txt
+          cache-dependency-path: |
+            requirements.txt
+            requirements-train.txt
 
       - name: Install dependencies
         run: |
-          pip install -r requirements.txt
+          # requirements-train.txt pulls in requirements.txt via -r.
+          # CI imports src.predict, which needs catboost.
+          pip install -r requirements-train.txt
           sudo apt-get update && sudo apt-get install -y libgomp1
 
       - name: Compile-check all Python sources
