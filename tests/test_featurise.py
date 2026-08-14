@@ -46,12 +46,69 @@ def features() -> pd.DataFrame:
 
 
 def test_lag_alignment(features: pd.DataFrame):
-    """wind_perc_lag_24h at row t must equal wind_perc at t-24 (hourly data)."""
+    """Admissible lags line up; weather lags line up."""
     df = features.reset_index(drop=True)
     i = 100
-    assert df.loc[i, "wind_perc_lag_24h"] == pytest.approx(df.loc[i - 24, "wind_perc"])
     assert df.loc[i, "wind_perc_lag_48h"] == pytest.approx(df.loc[i - 48, "wind_perc"])
+    assert df.loc[i, "wind_perc_lag_72h"] == pytest.approx(df.loc[i - 72, "wind_perc"])
     assert df.loc[i, "wind_speed_lag_24h"] == pytest.approx(df.loc[i - 24, "wind_speed_10m"])
+
+
+def test_no_sub_horizon_target_lags(features: pd.DataFrame):
+    """Regression guard for the leak that made this a nowcast.
+
+    wind_perc lags shorter than the 48h forecast horizon are future actuals at
+    issue time. They were present in training and NaN in production, and a
+    previous model put 88% of its importance on them. They must not come back.
+    """
+    banned = {"wind_perc_lag_30m", "wind_perc_lag_1h",
+              "wind_perc_lag_3h", "wind_perc_lag_24h"}
+    assert banned.isdisjoint(features.columns), (
+        f"sub-horizon target lag(s) reintroduced: "
+        f"{sorted(banned & set(features.columns))}")
+
+    for col in features.columns:
+        if col.startswith("wind_perc_lag_") and col.endswith("h"):
+            hours = int(col.removeprefix("wind_perc_lag_").removesuffix("h"))
+            assert hours >= featurise.FORECAST_HORIZON_H, f"{col} is inside the horizon"
+
+
+def test_target_history_features_are_embargoed():
+    """Every wp_roll_* value at time t must be computable from data <= t-48h."""
+    hours = pd.date_range("2023-01-01", periods=24 * 200, freq="h", tz="UTC")
+    rng = np.random.default_rng(7)
+    bb = pd.DataFrame({"datetime": hours,
+                       "wind_perc": np.clip(rng.normal(30, 10, len(hours)), 0, 100)})
+    out = featurise.target_history_features(bb).set_index("datetime")
+    s = bb.set_index("datetime")["wind_perc"]
+
+    t = hours[24 * 100]
+    cutoff = t - pd.Timedelta(hours=featurise.FORECAST_HORIZON_H)
+    # 7-day trailing mean ending at the embargo cutoff
+    expected = s.loc[cutoff - pd.Timedelta(hours=24 * 7 - 1):cutoff].mean()
+    assert out.loc[t, "wp_roll_mean_7d"] == pytest.approx(expected)
+    # and it must not equal a window that peeks past the cutoff
+    peeking = s.loc[t - pd.Timedelta(hours=24 * 7 - 1):t].mean()
+    assert out.loc[t, "wp_roll_mean_7d"] != pytest.approx(peeking)
+
+
+def test_backbone_supplies_history_for_inference():
+    """A 3-day inference window still gets long-horizon features, because the
+    backbone (history.parquet in production) carries the series."""
+    ci, met = _synthetic(days=3)
+    long_hours = pd.date_range("2023-09-01", "2023-12-03 23:00", freq="h", tz="UTC")
+    rng = np.random.default_rng(11)
+    backbone = pd.DataFrame({
+        "datetime": long_hours,
+        "wind_perc": np.clip(rng.normal(30, 10, len(long_hours)), 0, 100)})
+
+    without = featurise.engineer_features(ci.copy(), met.copy())
+    with_bb = featurise.engineer_features(ci.copy(), met.copy(), backbone=backbone)
+
+    # 168h lag cannot exist inside a 3-day window, but does with the backbone
+    assert without["wind_perc_lag_168h"].notna().sum() == 0
+    assert with_bb["wind_perc_lag_168h"].notna().sum() > 0
+    assert with_bb["wp_roll_mean_30d"].notna().sum() > 0
 
 
 def test_holiday_flag_seeded(features: pd.DataFrame):

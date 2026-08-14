@@ -35,6 +35,19 @@ CI_PARQUET = None
 MET_PARQUET = None
 OUT_PARQUET = None
 
+# The published forecast runs out to ~48h. A wind_perc observation is only
+# knowable at issue time if it predates the target by at least that much, so
+# every wind_perc-derived feature is shifted by this embargo. Features built
+# from shorter lags are future actuals: available while training, NaN when
+# serving, and the model silently learns to depend on them.
+FORECAST_HORIZON_H = 48
+
+# Rolling history of the target, used to compute the embargoed features. The
+# nightly ETL only fetches ~3 days, which is nowhere near enough for the
+# 365-day trend, so inference mode reads the backbone from here instead.
+HISTORY_PARQUET = FEAT_DIR_BASE / "history.parquet"
+SNAPSHOT_PARQUET = FEAT_DIR_BASE / "features.parquet"
+
 # ──────────────────────────
 # Load helpers
 # ──────────────────────────
@@ -53,10 +66,82 @@ def load_raw() -> tuple[pd.DataFrame, pd.DataFrame]:
     return ci, met
 
 
+def target_history_features(backbone: pd.DataFrame,
+                            embargo_h: int = FORECAST_HORIZON_H) -> pd.DataFrame:
+    """Causal features derived from the target's own history.
+
+    `backbone` is any frame with `datetime` + `wind_perc`; it is resampled onto
+    a strict hourly grid first, so windows are *time* spans regardless of
+    whether the source was 30-minute (old snapshots) or hourly (current ETL).
+    Row-based windows silently mean different things across those two eras.
+
+    Every column is shifted by `embargo_h` so it only ever reflects data that
+    predates the forecast issue time. This is what keeps the model honest: the
+    same values are present during training and at serve time.
+    """
+    bb = backbone[["datetime", "wind_perc"]].copy()
+    bb["datetime"] = pd.to_datetime(bb["datetime"], utc=True)
+    s = (bb.dropna(subset=["datetime"])
+           .set_index("datetime")["wind_perc"]
+           .resample("1h").mean()
+           .sort_index())
+
+    out = pd.DataFrame(index=s.index)
+    # Plain lags at or beyond the embargo. 48h is the persistence baseline the
+    # dashboard also plots; the rest give the model a few days of context.
+    for h in (48, 72, 96, 168):
+        out[f"wind_perc_lag_{h}h"] = s.shift(h)
+    # Trailing level and volatility. The 365-day mean is the installed-capacity
+    # proxy: GB wind capacity grew a lot over 2018-2026 and the target is a
+    # *share* of the mix, so without this the model can only absorb capacity
+    # growth as a vague time trend.
+    for hours, lab in ((24, "1d"), (24 * 7, "7d"), (24 * 30, "30d"), (24 * 365, "365d")):
+        out[f"wp_roll_mean_{lab}"] = (
+            s.rolling(hours, min_periods=max(2, hours // 4)).mean().shift(embargo_h))
+    for hours, lab in ((24 * 7, "7d"), (24 * 30, "30d")):
+        out[f"wp_roll_std_{lab}"] = (
+            s.rolling(hours, min_periods=max(2, hours // 4)).std().shift(embargo_h))
+
+    return out.reset_index()
+
+
+def load_backbone(fresh: pd.DataFrame) -> pd.DataFrame:
+    """Long wind_perc history for inference, newest values winning.
+
+    The nightly ETL fetches ~3 days, which cannot support a 365-day trailing
+    mean. history.parquet carries the full series from 2019, so union the two
+    and let the fresh rows override on overlap.
+    """
+    frames = []
+    for path in (HISTORY_PARQUET, SNAPSHOT_PARQUET):
+        if path.exists():
+            try:
+                past = pd.read_parquet(path, columns=["datetime", "wind_perc"])
+                frames.append(past)
+                logging.info("Backbone: %s rows from %s", len(past), path.name)
+            except (OSError, ValueError, KeyError) as e:
+                logging.warning("Could not read backbone from %s: %s", path, e)
+    frames.append(fresh[["datetime", "wind_perc"]])
+    bb = (pd.concat(frames, ignore_index=True)
+            .dropna(subset=["datetime"])
+            .drop_duplicates(subset="datetime", keep="last")
+            .sort_values("datetime")
+            .reset_index(drop=True))
+    span = (pd.to_datetime(bb["datetime"], utc=True).max()
+            - pd.to_datetime(bb["datetime"], utc=True).min()).days
+    logging.info("Backbone spans %s days (%s rows)", span, len(bb))
+    if span < 400:
+        logging.warning(
+            "Backbone spans only %s days; the 365-day capacity feature will be "
+            "NaN or unreliable. Check that history.parquet is present.", span)
+    return bb
+
+
 # ──────────────────────────
 # Feature engineering
 # ──────────────────────────
-def engineer_features(ci: pd.DataFrame, met: pd.DataFrame) -> pd.DataFrame:
+def engineer_features(ci: pd.DataFrame, met: pd.DataFrame,
+                      backbone: pd.DataFrame | None = None) -> pd.DataFrame:
     """
     • align 30‑min timestamps (nearest ±30 min)
     • add lags (30 m / 1 h / 3 h / 24 h / 48 h)
@@ -113,26 +198,33 @@ def engineer_features(ci: pd.DataFrame, met: pd.DataFrame) -> pd.DataFrame:
         # Pressure level + 3h tendency: synoptic-scale frontal passage signal.
         df["pressure_delta_3h"] = df["surface_pressure"].diff(3)
 
-    # ─── lags ─────────────────────────
-    # df is hourly after merge_asof(met, ci, ...)
-    # Original wind_perc was 30-min, but is now aligned to hourly by the merge.
-    # So, shift(N) on both wind_perc and wind_speed_10m will be an N-hour shift.
-    # NOTE: "30m" maps to a 1-hour shift, so the *_lag_30m columns duplicate
-    # *_lag_1h exactly. They are kept because the shipped model.cbm was
-    # trained with both columns; dropping one requires retraining.
-    hourly_lag_config = {   # label : hours_to_shift
-        "30m": 1,       # duplicates the 1h lag on hourly data (see NOTE above)
-        "1h":  1,
-        "3h":  3,
-        "24h": 24,
-        "48h": 48,
-    }
+    # ─── air density ──────────────────
+    # Turbine power is proportional to rho * v^3, not v^3 alone. rho = P/(R·T)
+    # from the ideal gas law; cold dense air carries materially more energy at
+    # the same wind speed.
+    if {"surface_pressure", "temperature_2m"} <= set(df.columns):
+        df["air_density"] = (df["surface_pressure"] * 100.0) / (
+            287.05 * (df["temperature_2m"] + 273.15))
+        if "wind_speed_100m" in df.columns:
+            df["rho_v3_100m"] = df["air_density"] * df["wind_speed_100m"] ** 3
 
-    for label, lag_hours in hourly_lag_config.items():
-        df[f"wind_perc_lag_{label}"]    = df["wind_perc"].shift(lag_hours)
+    # ─── weather lags ─────────────────
+    # df is hourly after merge_asof(met, ci, ...). These lag the *weather*,
+    # which is forecast out over the whole window, so they are known at issue
+    # time and are safe to use at any horizon.
+    for label, lag_hours in {"1h": 1, "3h": 3, "24h": 24, "48h": 48}.items():
         df[f"wind_speed_lag_{label}"] = df["wind_speed_10m"].shift(lag_hours)
         if "wind_speed_100m" in df.columns:
             df[f"wind_speed_100m_lag_{label}"] = df["wind_speed_100m"].shift(lag_hours)
+
+    # ─── target history (embargoed) ───
+    # Deliberately NOT df["wind_perc"].shift(1/3/24): those are future actuals
+    # at forecast time. They were 88% of the old model's importance and arrived
+    # as NaN in production. See target_history_features().
+    if backbone is None:
+        backbone = df
+    hist_feats = target_history_features(backbone)
+    df = df.merge(hist_feats, on="datetime", how="left")
 
     # ─── rolling stats on wind‑speed ─
     # Window sizes are in HOURLY rows (the data is hourly after merge_asof),
@@ -176,9 +268,15 @@ def engineer_features(ci: pd.DataFrame, met: pd.DataFrame) -> pd.DataFrame:
     # Columns that, if NaN, would justify dropping a row for feature generation.
     # This typically includes weather data and its derivatives, and calendar features.
     # Exclude 'wind_perc' and its direct lags as they will be NaN for future predictions.
+    # The embargoed target-history columns (wind_perc_lag_*h, wp_roll_*) are
+    # NaN while their window warms up — 365 days for the capacity trend. They
+    # must be excluded from the dropna subset or the early years are wiped and
+    # inference (which has no local history) drops every row.
+    warmup_columns = [c for c in df.columns
+                      if c.startswith("wp_roll_") or c.startswith("wind_perc_lag_")]
     predictor_columns = [
-        col for col in df.columns 
-        if col not in ["wind_perc"] + wind_perc_derived_lags
+        col for col in df.columns
+        if col not in ["wind_perc"] + wind_perc_derived_lags + warmup_columns
     ]
     logging.info("Predictor columns for dropna: %s", predictor_columns)
 
@@ -240,7 +338,10 @@ def main(mode: str = "inference") -> None:
             "so stale downstream outputs are kept instead of overwritten."
         )
 
-    features = engineer_features(ci, met)
+    # Training has the whole series locally; inference must borrow it from
+    # history.parquet, since the ETL only fetched the last ~3 days.
+    backbone = None if mode == "training" else load_backbone(ci)
+    features = engineer_features(ci, met, backbone=backbone)
     if features.empty:
         raise ValueError(
             "Feature engineering produced no rows; aborting instead of writing an empty file."
