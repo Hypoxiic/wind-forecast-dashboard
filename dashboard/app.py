@@ -406,6 +406,8 @@ def forecast_hero():
 raw_metrics = safe_json(METRICS_PATH)
 cat_rmse    = raw_metrics.get("holdout_rmse_perc", np.nan)
 cat_mape    = raw_metrics.get("holdout_mape_perc", np.nan)
+holdout_days = raw_metrics.get("holdout_days", 30)
+band_cov    = raw_metrics.get("holdout_band_coverage_p10_p90", np.nan)
 
 # ─── Load & Compute Baseline & Prepare Plot Data ───────────────────────────
 # Read rolling-history of features (actuals and baseline lags)
@@ -623,14 +625,20 @@ app.layout = dbc.Container([
         html.P(
           "A GPU-tuned CatBoost model forecasts the day-ahead share of GB electricity "
           "generation coming from wind. Carbon Intensity wind percentage is merged with "
-          "Open-Meteo weather; power-curve proxies, lags and seasonal features feed the "
-          "model, with Optuna tuning over five expanding walk-forward CV splits.",
+          "Open-Meteo weather; power-curve proxies, air density, a trailing capacity "
+          "trend and seasonal features feed the model, with Optuna tuning over five "
+          "expanding walk-forward CV splits. Every feature built from wind output "
+          "itself is lagged by at least the 48h forecast horizon, so the model is "
+          "scored on exactly the information it has when the forecast is issued.",
           className="mb-2 mt-2"
         ),
         html.P(
-          f"Hold-out (last 48 h) error from training: RMSE ≈ {fmt_metric(cat_rmse)} %-points • "
-          f"MAPE ≈ {fmt_metric(cat_mape * 100, '{:.1f}')}%. Errors are points on the 0–100 "
-          "share scale, not relative error.",
+          f"Out-of-sample hold-out (final {holdout_days} days, never trained on): "
+          f"RMSE ≈ {fmt_metric(cat_rmse)} %-points • "
+          f"MAPE ≈ {fmt_metric(cat_mape * 100, '{:.1f}')}%. "
+          f"P10–P90 band covers ≈ {fmt_metric(band_cov * 100, '{:.0f}')}% of actuals "
+          "against a nominal 80%, after split-conformal calibration. Errors are points "
+          "on the 0–100 share scale, not relative error.",
           className="fst-italic small mb-0"
         ),
     ], className="wf-about")), className="mb-4 wf-panel"),
@@ -717,10 +725,12 @@ def render_content(theme_switch_on, active_tab, series_sel, start_d_global, end_
                       tooltip="Symmetric MAPE of the 48h-persistence baseline over the most recent 24h of actuals"),
             make_card("Model RMSE · holdout", fmt_metric(cat_rmse), " pts", cat_rmse_col, md=2,
                       delta=f"{cat_rmse_ic} vs baseline" if cat_rmse_ic else None,
-                      tooltip="CatBoost error on the final 48h training holdout — points on the 0–100 share scale"),
+                      tooltip=f"CatBoost error on the final {holdout_days}-day out-of-sample "
+                              "holdout, at the ~48h day-ahead horizon the app actually publishes. "
+                              "Points on the 0–100 share scale."),
             make_card("Model MAPE · holdout", fmt_metric(cat_mape * 100, "{:.1f}"), "%", cat_mape_col, md=2,
                       delta=f"{cat_mape_ic} vs baseline" if cat_mape_ic else None,
-                      tooltip="CatBoost MAPE on the final 48h training holdout"),
+                      tooltip=f"CatBoost MAPE on the final {holdout_days}-day out-of-sample holdout"),
         ]
         kpi_cards_content = [dbc.Row([t for t in tiles if t is not None], className="g-3 mb-4")]
 
