@@ -37,7 +37,8 @@ Short‑horizon wind output (as a percentage of the mix) drives GB's supply‑de
                                                         │
                                                         ▼
                                 src/featurise.py --mode training ─▶ data/features/training_features.parquet
-                                                        │           (+ lags, seasonality, v³ proxy)
+                                                        │           (embargoed target history, air density,
+                                                        │            v³ proxies, seasonality)
                                                         ▼
                                         src/train_model.py    ─▶ models/model.cbm, metrics.json
                                         src/validate.py       ─▶ cv_metrics.json
@@ -66,7 +67,7 @@ Displays data via dashboard/app.py in two tabs:
 A GitHub Actions workflow (`.github/workflows/nightly.yml`) runs at **01:30 UTC** every night:
 
 1. Executes `src/pipeline.py` which:
-    a. Fetches latest actual wind % (inc. today) and weather (history + 48h forecast) using `src/etl_inference.py`.
+    a. Fetches the last **14 days** of actual wind % (inc. today) and weather (history + 48h forecast) using `src/etl_inference.py`. Fourteen days rather than three so that any gap shorter than a fortnight heals itself on the next successful run — the model's strongest features are trailing windows over wind output, so holes in the rolling history degrade the live forecast directly.
     b. Generates features for the inference period using `src/featurise.py` (inference mode).
     c. Runs the prediction using the trained model (`models/model.cbm`) via `src/predict.py`.
     d. Updates the rolling `data/features/history.parquet`.
@@ -80,18 +81,52 @@ A GitHub Actions workflow (`.github/workflows/nightly.yml`) runs at **01:30 UTC*
 | Factor                                                  | Contribution                                                  |
 | ------------------------------------------------------- | ------------------------------------------------------------- |
 | **Composite wind-speed forecast at 10m & 100m (D-1)** | Turbine power curve → explains ≈ 90 % of wind output variance. Capacity-weighted across 5 GB wind regions (Scotland, North Sea, East Anglia, Irish Sea, Moray Firth); 100m sits near real hub height. |
-| **Yesterday's observed output (%age)**                  | Autocorrelation + system inertia (percentage reflects mix).   |
-| Engineered extras (v³ proxies at both heights, gust factor, wind direction, pressure tendency, seasonality, holiday flag) | Mop‑up residual bias.                                         |
+| **Trailing capacity / regime level** | A 365-day trailing mean of wind share, lagged past the forecast horizon. The target is a *share of the mix*, and GB wind capacity grew substantially over 2018–2026 — without this the model can only absorb that growth as a vague time trend. It is the single largest feature by importance. |
+| **Air density (ρ = P/RT) and ρ·v³** | Turbine power scales with air density, not wind speed alone; cold dense air carries materially more energy at the same speed. |
+| Engineered extras (v³ proxies at both heights, gust factor, wind direction sin/cos, pressure tendency, seasonality, holiday flag) | Mop‑up residual bias. |
 
-Walk‑forward CV + Optuna tuning + early‑stopping keep the CatBoost model honest. Companion P10/P90 quantile models provide the uncertainty band (holdout coverage ≈ 79 %, mean width ≈ 3.6 pts).
+### The 48-hour embargo
+
+Every feature derived from wind output itself is lagged by at least the 48 h
+forecast horizon. This matters more than it sounds: an earlier version of this
+model used `wind_perc` lagged 1 h and 3 h, which are simply *not known* when a
+day-ahead forecast is issued. They accounted for 88 % of that model's feature
+importance and arrived as NaN in production, so the accuracy it advertised
+described a one-hour nowcast rather than the forecast being served. The current
+feature set is restricted to information genuinely available at issue time, and
+`tests/test_featurise.py` fails the build if a sub-horizon lag reappears.
+
+Walk-forward CV and Optuna tuning (over data strictly *before* the hold-out)
+keep the model honest. Companion P10/P90 quantile models provide the
+uncertainty band, corrected by a **split-conformal delta** measured on a 60-day
+calibration window the quantile models never saw — raw quantile regression is
+not calibrated by construction and was covering ~68 % against a nominal 80 %.
+
+### Repairing the rolling history
+
+If the nightly job fails for a stretch, `data/features/history.parquet` is left
+with a hole that the 3-day (now 14-day) fetch cannot close. Because the model
+leans on trailing windows over wind output, that shows up as degraded — or
+missing — features at forecast time. To repair:
+
+```bash
+python -m src.backfill_history --days 430          # refetch and fill gaps
+python -m src.backfill_history --start 2026-05-01 --end 2026-08-14
+```
+
+It is re-runnable and fills only what is missing unless `--overwrite` is given.
 
 ---
 
 ## 4  Quick‑start (local)
 
 ```bash
-# Install deps (CUDA optional but speeds training)
+# Runtime only (what the Render web service installs)
 pip install -r requirements.txt
+
+# Training / nightly inference — pulls in requirements.txt plus catboost,
+# scikit-learn, optuna, tqdm. CUDA optional but speeds training a lot.
+pip install -r requirements-train.txt
 
 # --- Training Pipeline (Run once or when retraining) ---
 # 1. Fetch full history and weather data for training
@@ -106,6 +141,10 @@ python src/featurise.py --mode training
 #    OPTUNA_TRIALS=0 CATBOOST_DEVICE=CPU python src/train_model.py
 python src/train_model.py
 python src/validate.py
+
+# 4. Out-of-sample historical predictions for the dashboard's Historical tab.
+#    Expanding-window backtest; without this the tab would show in-sample fit.
+python -m src.backtest
 
 # --- Tests ---
 python -m pytest tests/ -q
@@ -130,7 +169,45 @@ python dashboard/app.py         # http://127.0.0.1:8050
 
 ---
 
-## 5  Directory map
+## 5  Model performance
+
+All figures are **%-points on the 0-100 wind-share scale**, at the ~48 h
+day-ahead horizon the app actually publishes, using only information available
+when the forecast is issued.
+
+| Metric | Value | Source |
+| ------ | ----- | ------ |
+| **Walk-forward CV RMSE** (5 expanding folds) | **6.86 %-points** (+/- 1.30) | `cv_metrics.json` via `src/validate.py` |
+| Walk-forward CV SMAPE | 25.5 % (+/- 5.7) | `cv_metrics.json` |
+| Hold-out RMSE (final 30 days, never trained on) | 5.81 %-points | `metrics.json` via `src/train_model.py` |
+| 48 h persistence baseline, same hold-out window | 15.31 %-points | `metrics.json` |
+| Month-hour climatology baseline (CV mean) | 16.60 %-points | `cv_metrics.json` |
+| 48 h persistence baseline (CV mean) | 18.50 %-points | `cv_metrics.json` |
+| P10-P90 band coverage | 79 % vs 80 % nominal | `metrics.json` |
+| Features | 50 | - |
+
+The walk-forward figure is the one to quote. Its folds are large (~485 days
+each) and the earliest fold trains on a fraction of the series, so it is
+deliberately harsher than the 30-day hold-out - and it better reflects
+behaviour across regimes rather than one recent month.
+
+Persistence is a weak bar on a series this autocorrelated, so month-hour
+climatology is reported alongside it as the harder reference. The model beats
+climatology by roughly **59 %**.
+
+### Reading the Historical tab
+
+`models/catboost_full.parquet` is produced by `src/backtest.py`, an
+expanding-window backtest: every historical prediction shown is one the model
+could have made at that time, fitted only on preceding data. Rows before the
+first backtest fold are left blank rather than filled with an in-sample guess,
+which is why the prediction line starts partway through the series. The RMSE
+and SMAPE cards on that tab are therefore out-of-sample and consistent with
+the headline figures above.
+
+---
+
+## 6  Directory map
 
 ```text
 wind‑forecast‑dashboard/
@@ -172,7 +249,7 @@ wind‑forecast‑dashboard/
 
 ---
 
-## 6  Road‑map
+## 7  Road‑map
 
 * [x] GPU CatBoost + walk‑forward CV (predicting percentage)
 * [x] Full‑history predictions for dashboard (percentage)

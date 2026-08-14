@@ -14,9 +14,17 @@ The target is `wind_perc` (0–100), **not** absolute MW. Errors quoted as
 [src/etl_training.py](src/etl_training.py) →
 [src/featurise.py](src/featurise.py) `--mode training` →
 [src/train_model.py](src/train_model.py) →
-[src/validate.py](src/validate.py).
+[src/validate.py](src/validate.py) →
+[src/backtest.py](src/backtest.py).
 Produces [models/model.cbm](models/model.cbm),
-[metrics.json](metrics.json), [cv_metrics.json](cv_metrics.json).
+[metrics.json](metrics.json), [cv_metrics.json](cv_metrics.json),
+[models/catboost_full.parquet](models/catboost_full.parquet).
+
+`backtest.py` is not optional. The Historical tab's chart and KPI cards read
+`catboost_full.parquet`; filling it by predicting the training data made that
+tab advertise an in-sample ~1.3 next to the hero card's honest ~5.8. It now
+runs an expanding-window backtest, and rows before the first fold stay NaN
+rather than being back-filled with an in-sample guess.
 
 **Nightly inference (GitHub Actions):**
 [src/pipeline.py](src/pipeline.py) orchestrates
@@ -32,6 +40,50 @@ never touches. `pipeline.py` then unions snapshot + prior history + new
 rows into `history.parquet` (idempotent, keyed on `datetime`) and fails
 loudly — any empty or missing input raises, so the Actions job goes red
 instead of republishing stale forecasts as a fresh nightly update.
+
+## The 48h embargo (read this before touching features)
+
+The product publishes a **day-ahead** forecast, so a `wind_perc` observation is
+only usable as a feature if it predates the target by >= 48h. An earlier
+version took every column indiscriminately, which pulled in
+`wind_perc_lag_{30m,1h,3h,24h}` — present while training, NaN in production.
+They carried **88% of that model's feature importance**, so the advertised
+accuracy (RMSE 1.39) described a one-hour nowcast while the thing actually
+served scored ~12.1. Fixing it is what took the live forecast to ~5.4.
+
+Consequences, all of which must be kept in sync:
+- [src/featurise.py](src/featurise.py) `target_history_features()` builds every
+  target-derived feature on a strict hourly grid and shifts it by
+  `FORECAST_HORIZON_H = 48`. It is the *only* place `wind_perc` may be lagged.
+- [src/train_model.py](src/train_model.py) and [src/validate.py](src/validate.py)
+  both re-filter with `_is_admissible()` as a belt-and-braces guard.
+- `tests/test_featurise.py::test_no_sub_horizon_target_lags` fails the build if
+  a sub-horizon lag reappears.
+
+Inference cannot compute a 365-day trailing mean from the nightly's short
+fetch, so `featurise.main(mode="inference")` passes a **backbone** — the union
+of `history.parquet`, `features.parquet` and the fresh pull — into
+`engineer_features`. If `history.parquet` is thin, the capacity features go
+NaN at serve time and the skew comes straight back.
+
+## Data gaps matter now
+
+The strongest features are trailing windows over the target, so holes in
+`history.parquet` degrade the live forecast. The broken-nightly period left
+gaps (56 days to 2026-07-03, 23 days to 2026-08-10) that put last-30-day
+coverage at 20%. Repaired to ~97% with
+[src/backfill_history.py](src/backfill_history.py) (`python -m
+src.backfill_history --days 430`). `etl_inference.CI_HISTORY_DAYS` is now 14,
+not 3, so gaps shorter than a fortnight heal on the next successful run.
+
+## Uncertainty band
+
+`model_p10/p90.cbm` are quantile companions, but quantile regression is not
+calibrated by construction — raw coverage measured 68% against a nominal 80%.
+`train_model.py` measures a **split-conformal delta** on a 60-day calibration
+window the quantile models never saw, stores it as `conformal_delta_pts` in
+[metrics.json](metrics.json), and `predict.py` widens (or narrows — the delta
+can be negative) both bounds by it.
 
 ## Data sources
 - **Carbon Intensity API** — GB wind generation as % of mix (the target).
@@ -114,6 +166,10 @@ hooks on commit. Configuration lives in [pyproject.toml](pyproject.toml).
 ## Gotchas worth knowing
 - The legacy `wind_mw` column is gone from the source tree but still
   appears in old git blame. The current target is `wind_perc` everywhere.
+- Rolling windows on `wind_speed_*` are still row-based and still mislabeled
+  (`_3h` is 6 rows, `_24h` is 48, `_48h` is 96). The *target* windows in
+  `target_history_features` are time-based and correctly named — don't assume
+  the two families behave alike.
 - Weather inputs were upgraded (2026-08): both ETLs now fetch
   `temperature_2m, wind_speed_10m, wind_speed_100m, wind_gusts_10m,
   wind_direction_10m, surface_pressure`. The Open-Meteo **archive** only
@@ -128,10 +184,15 @@ hooks on commit. Configuration lives in [pyproject.toml](pyproject.toml).
 - Fast retrain: `OPTUNA_TRIALS=0 CATBOOST_DEVICE=CPU python src/train_model.py`
   reuses `best_params` from [metrics.json](metrics.json) instead of the
   100-trial search. Full retune still available via `OPTUNA_TRIALS=100`.
-- [cv_metrics.json](cv_metrics.json) was regenerated 2026-08 with the
-  SMAPE block (validate.py uses SMAPE because unbounded MAPE explodes on
-  calm hours). `is_holiday` is now genuinely populated in the shipped
-  model — the constant-0 training column bug is fixed as of the retrain.
+- [cv_metrics.json](cv_metrics.json) regenerated after the honest rebuild:
+  walk-forward RMSE **6.86 ± 1.30 %-pts** against
+  climatology 16.60 and 48h-persistence
+  18.50. Hold-out (final 30 days,
+  untouched by tuning) is 5.81. **Quote the
+  walk-forward number** — its folds are ~485 days and the earliest trains on a
+  fraction of the series, so it is the conservative one. Anything near 1.4 is
+  a pre-fix leaked figure. validate.py uses SMAPE because unbounded MAPE
+  explodes on calm hours.
 - `tests/test_featurise.py` covers lag alignment, holiday seeding, the
   power-curve proxies and rolling-window leakage; CI runs it on every push.
 - The Render deploy hook URL was previously committed in plaintext in
