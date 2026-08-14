@@ -503,8 +503,12 @@ def make_card(title, value, unit, colour, tooltip=None, delta=None, md=None):
 # defaults to dashboard/assets/ (next to this file), so the custom CSS was
 # never actually served. Point it at the real folder. The Inter stylesheet is
 # a separate link, untouched by ThemeSwitchAIO's theme swapping.
+# compress: Dash 2.18 defaults this to False, so every response — including
+# the ~4.5 MB plotly.min.js and the multi-MB callback payloads — went over the
+# wire uncompressed. Requires flask-compress (raises at import without it).
 app    = Dash(__name__, external_stylesheets=[CSS_LIGHT, FONT_CSS, dmc.styles.DATES],
               suppress_callback_exceptions=True,
+              compress=True,
               assets_folder=str(ROOT / "assets"))
 server = app.server
 app.title = "GB Wind · Day-Ahead Forecast"
