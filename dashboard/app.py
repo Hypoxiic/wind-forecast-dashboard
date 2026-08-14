@@ -180,6 +180,26 @@ def _rgba(hex_color: str, alpha: float) -> str:
     h = hex_color.lstrip("#")
     return f"rgba({int(h[0:2],16)},{int(h[2:4],16)},{int(h[4:6],16)},{alpha})"
 
+# Points per trace shipped to the browser. A chart is ~1200 px wide, so this
+# is roughly 3 samples per horizontal pixel — past that the extra points can't
+# resolve, they just inflate the payload. All-time is 112k points × 5 traces.
+PLOT_BUDGET = 4000
+
+def thin(df, cols, budget=PLOT_BUDGET):
+    """Bucket-mean `df` down to <= budget rows, preserving curve shape.
+
+    Plot-path only. Never feed the result to a KPI, an aggregate or the
+    worst-days table: averaging before those changes the number the user
+    reads. Callers keep the unthinned frame for that.
+    """
+    if len(df) <= budget:
+        return df
+    keep = [c for c in cols if c in df.columns]
+    rule = f"{int(np.ceil(len(df) / budget))}h"
+    return (df.set_index("datetime")[keep]
+              .resample(rule).mean()
+              .reset_index())
+
 def style_series_figure(fig, df, series_sel, mode_key, *, end_labels=False,
                         shade_forecast=False, area_actual=False, dense=False):
     """Apply the design-system mark specs to a px.line figure in place:
@@ -842,15 +862,19 @@ def render_content(theme_switch_on, active_tab, series_sel, start_d_global, end_
             fig_historical_content = html.Div("No data available for that selection.")
         else:
             span_days = max((df_hist_tab.datetime.max() - df_hist_tab.datetime.min()).days, 0)
+            # Plot-only downsample. The KPI cards above and the worst-days
+            # table below deliberately keep reading df_hist_tab / error_df.
+            df_plot = thin(df_hist_tab,
+                           series_sel + ["wind_perc_pred_p10", "wind_perc_pred_p90"])
             fig_hist = px.line(
-                df_hist_tab, x="datetime", y=series_sel,
+                df_plot, x="datetime", y=series_sel,
                 template=template, color_discrete_map=colors,
                 labels={"variable": "", "datetime": ""},
             )
-            style_series_figure(fig_hist, df_hist_tab, series_sel, mode_key,
+            style_series_figure(fig_hist, df_plot, series_sel, mode_key,
                                 end_labels=span_days <= 45, dense=span_days > 45)
             if "wind_perc_pred" in series_sel:
-                add_uncertainty_band(fig_hist, df_hist_tab, mode_key)
+                add_uncertainty_band(fig_hist, df_plot, mode_key)
             fig_hist.update_layout(title_text="Wind share of GB generation — history & model",
                                    margin=dict(t=64))
 
@@ -859,14 +883,23 @@ def render_content(theme_switch_on, active_tab, series_sel, start_d_global, end_
             error_df = error_df.dropna(subset=["prediction_error"])
             if not error_df.empty:
                 error_content = dcc.Graph(
-                    figure=build_error_figure(error_df, df_hist_tab.datetime.min(),
+                    figure=build_error_figure(thin(error_df, ["prediction_error"]),
+                                              df_hist_tab.datetime.min(),
                                               df_hist_tab.datetime.max(), mode_key, template),
                     config={"displayModeBar": False})
 
                 # ── Error analytics: distribution + worst days ──
-                hist_fig = px.histogram(
-                    error_df, x="prediction_error", nbins=60, template=template,
-                    color_discrete_sequence=[SERIES_COLORS[mode_key]["wind_perc"]])
+                # Binned server-side: px.histogram ships every raw value and
+                # bins in the browser, so all-time sent 112k floats to draw
+                # 60 bars. Counts come from the full error_df either way.
+                counts, edges = np.histogram(error_df["prediction_error"], bins=60)
+                hist_fig = go.Figure(go.Bar(
+                    x=(edges[:-1] + edges[1:]) / 2, y=counts,
+                    width=float(edges[1] - edges[0]),
+                    marker_color=SERIES_COLORS[mode_key]["wind_perc"],
+                    hovertemplate="%{y} hours<extra>%{x:.1f} pts</extra>",
+                    showlegend=False))
+                hist_fig.update_layout(template=template)
                 hist_fig.update_layout(
                     title=dict(text="Error distribution (%-points)", font=dict(size=13)),
                     height=190, showlegend=False, bargap=0.05,
