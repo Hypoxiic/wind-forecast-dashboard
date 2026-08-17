@@ -878,22 +878,25 @@ def render_content(theme_switch_on, active_tab, series_sel, start_d_global, end_
                 interval_df["wind_perc"] = interval_df["wind_perc"].round(1)
                 interval_df["wind_perc_pred"] = interval_df["wind_perc_pred"].round(1)
 
-                columns = [{"name": "Timestamp", "id": "datetime"}]
-                data = []
-                for _, row in interval_df.iterrows():
-                    data_row = {"datetime": row["datetime"]}
-                    if not np.isnan(row["wind_perc"]):
-                        data_row["actual"] = f"{row['wind_perc']}%"
-                        if "actual" not in [c["id"] for c in columns]:
-                            columns.append({"name": "Actual", "id": "actual"})
-                    if not np.isnan(row["wind_perc_pred"]):
-                        data_row["predicted"] = f"{row['wind_perc_pred']}%"
-                        if "predicted" not in [c["id"] for c in columns]:
-                            columns.append({"name": "Predicted", "id": "predicted"})
-                    data.append(data_row)
+                # from_dataframe takes its headers from the column labels, so
+                # the frame is built with the display names directly. The
+                # previous version assembled a separate `columns` list that
+                # was never passed anywhere, which is why the header row read
+                # "DATETIME / PREDICTED / ACTUAL" — raw ids, in whichever
+                # order the first row happened to populate them.
+                tbl = pd.DataFrame([{
+                    "Timestamp": row["datetime"],
+                    "Actual": "—" if np.isnan(row["wind_perc"]) else f"{row['wind_perc']}%",
+                    "Predicted": ("—" if np.isnan(row["wind_perc_pred"])
+                                  else f"{row['wind_perc_pred']}%"),
+                } for _, row in interval_df.iterrows()])
+                # A column with nothing in it is dead weight on a phone.
+                for c in ("Actual", "Predicted"):
+                    if (tbl[c] == "—").all():
+                        tbl = tbl.drop(columns=c)
 
                 values_table = dbc.Table.from_dataframe(
-                    pd.DataFrame(data), striped=True, hover=True,
+                    tbl, striped=True, hover=True,
                     responsive=True, size="sm", className="mt-3")
             else:
                 values_table = html.Div("No interval data available", className="text-center py-2")
