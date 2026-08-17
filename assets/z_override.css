@@ -289,8 +289,16 @@ body::before {
 }
 .DateRangePickerInput_arrow svg { fill: var(--wf-muted) !important; }
 
+/* series picker: width lives here, not inline on the Dropdown, so the
+   media query at the foot of this file can widen it to the full column */
+.wf-series-picker { width: 300px; }
+.wf-series-label { white-space: nowrap; margin-bottom: 0; }
+.wf-dateinput { flex: 1 1 auto; }
+
 /* ── Charts & tables ──────────────────────────────────────────────── */
 .js-plotly-plot { border-radius: var(--wf-radius-sm); overflow: hidden; }
+/* plotly sizes its SVG in px; cap it so a chart can never widen the page */
+.js-plotly-plot, .plot-container, .wf-graph { max-width: 100%; }
 
 .table {
     --bs-table-bg: transparent;
@@ -345,3 +353,70 @@ body::before {
 /* text utility overrides so bootstrap's secondary follows the theme */
 .text-secondary { color: var(--wf-ink-2) !important; }
 .text-muted { color: var(--wf-muted) !important; }
+
+/* ── Touch devices ────────────────────────────────────────────────── */
+/* The lift-on-hover reads as a stuck :hover after a tap, because a touch
+   "hover" persists until the next tap elsewhere. */
+@media (hover: none) {
+    .wf-metric-card:hover { transform: none; box-shadow: var(--wf-shadow) !important; }
+}
+
+/* ── Narrow viewports (< md) ──────────────────────────────────────── */
+/* Anything the plotly layout owns — chart height, margins, legend, tick
+   density — is tuned in tune_figure() instead; CSS can't reach inside the
+   figure. This block handles the page chrome around the charts. */
+@media (max-width: 767.98px) {
+    .container-fluid { padding-top: 8px !important; }
+
+    /* header stacks: logo + wordmark, then the actions row beneath */
+    .wf-brand { gap: 10px; align-items: flex-start; }
+    .wf-logo { width: 34px; height: 34px; border-radius: 10px; padding: 6px; flex: 0 0 auto; }
+    .wf-title { font-size: 1.1rem; }
+    .wf-subtitle { font-size: 0.75rem; line-height: 1.35; }
+    .wf-chip { font-size: 0.71rem; padding: 4px 10px; }
+
+    /* metric tiles run two-up, so the type has to come down with them */
+    .wf-metric-card .card-body { padding: 11px 12px; }
+    .wf-metric-label { font-size: 0.61rem; min-height: 3.4em; margin-bottom: 5px; }
+    .wf-metric-value { font-size: 1.2rem; }
+    .wf-metric-unit { font-size: 0.78rem; }
+    .wf-delta { font-size: 0.68rem; margin-top: 5px; }
+    .wf-hero .card-body { padding: 14px 15px; }
+    .wf-hero-value { font-size: 2.4rem; }
+    .wf-hero-unit { font-size: 0.86rem; }
+    .wf-hero-sub { font-size: 0.74rem; }
+
+    .wf-panel .card-body { padding: 12px 13px; }
+    .wf-about p { font-size: 0.8rem; }
+
+    /* both tab labels have to fit one line at 360px without a scroll */
+    .nav-tabs .nav-link { font-size: 0.82rem; padding: 0.5rem 0.6rem; }
+
+    /* presets span the width and clear a ~40px tap target */
+    .wf-segmented { display: flex; width: 100%; }
+    .wf-segmented .btn { flex: 1 1 0; padding: 10px 2px; font-size: 0.75rem; }
+    .wf-btn { padding: 7px 12px; }
+
+    .wf-series-col { flex-wrap: wrap; }
+    .wf-series-picker { width: 100%; }
+    .wf-series-label { width: 100%; margin-bottom: 4px !important; font-size: 0.8rem; }
+
+    /* w=150 is an inline style on the Mantine root — needs !important */
+    .wf-dateinput { width: 100% !important; }
+
+    .table { font-size: 0.75rem; }
+    .table td, .table th { padding: 0.35rem 0.4rem; }
+    .table thead th { font-size: 0.62rem; }
+
+    .wf-trend { font-size: 0.75rem; padding: 5px 10px; }
+    .wf-loading { min-height: 220px; }
+    h6 { font-size: 0.9rem; }
+}
+
+/* very narrow (iPhone SE and similar): the two-up tiles get tight */
+@media (max-width: 380px) {
+    .wf-title { font-size: 1.02rem; }
+    .wf-hero-value { font-size: 2.1rem; }
+    .wf-metric-value { font-size: 1.1rem; }
+    .wf-segmented .btn { font-size: 0.7rem; padding: 10px 1px; }
+}

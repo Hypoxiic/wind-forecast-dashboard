@@ -206,7 +206,8 @@ def thin(df, cols, budget=PLOT_BUDGET):
               .reset_index())
 
 def style_series_figure(fig, df, series_sel, mode_key, *, end_labels=False,
-                        shade_forecast=False, area_actual=False, dense=False):
+                        shade_forecast=False, area_actual=False, dense=False,
+                        compact=False):
     """Apply the design-system mark specs to a px.line figure in place:
     2px lines (1.6px on dense multi-year data), no per-point markers, an
     end-dot with a surface ring + direct value label on short windows, a
@@ -257,15 +258,19 @@ def style_series_figure(fig, df, series_sel, mode_key, *, end_labels=False,
                               opacity=0.06, line_width=0)
                 fig.add_vline(x=last_actual, line_width=1, line_dash="dot",
                               line_color=c["muted"])
-                fig.add_annotation(
-                    x=last_actual, y=1, yref="paper", yanchor="top", yshift=-4,
-                    xanchor="left", xshift=6, text="forecast →", showarrow=False,
-                    font=dict(size=11, color=c["muted"], family=FONT_STACK))
+                # On a narrow chart this label lands on top of the end-of-series
+                # value tag. The dotted rule and the amber wash already read as
+                # "everything right of here is forecast", so drop just the text.
+                if not compact:
+                    fig.add_annotation(
+                        x=last_actual, y=1, yref="paper", yanchor="top", yshift=-4,
+                        xanchor="left", xshift=6, text="forecast →", showarrow=False,
+                        font=dict(size=11, color=c["muted"], family=FONT_STACK))
 
     fig.update_yaxes(ticksuffix="%", rangemode="tozero", title=None)
     fig.update_xaxes(title=None)
 
-def add_uncertainty_band(fig, df, mode_key):
+def add_uncertainty_band(fig, df, mode_key, compact=False):
     """P10–P90 uncertainty band behind the forecast line, drawn from the
     quantile-model columns. Traces are appended, then moved to the back so
     the series lines and end labels stay on top."""
@@ -282,13 +287,60 @@ def add_uncertainty_band(fig, df, mode_key):
         x=band["datetime"], y=band["wind_perc_pred_p90"], mode="lines",
         line=dict(width=0), fill="tonexty", fillcolor=_rgba(col, 0.15),
         hovertemplate="%{y:.1f}%<extra>P10–P90 range</extra>",
-        name="Forecast range (P10–P90)", showlegend=True)
+        # The full label is the widest legend entry by some way and pushes the
+        # horizontal legend onto a second row on a phone.
+        name="P10–P90" if compact else "Forecast range (P10–P90)", showlegend=True)
     n_before = len(fig.data)
     fig.add_traces([t_lo, t_hi])
     data = list(fig.data)
     fig.data = tuple(data[n_before:] + data[:n_before])
 
-def build_error_figure(error_df, x_min, x_max, mode_key, template):
+# ─── Responsive helpers ──────────────────────────────────────────────────────
+# Figure geometry (margins, legend placement, height, tick density, drag
+# behaviour) lives inside the plotly layout, so a CSS media query cannot reach
+# it. A 1.2s clientside poll publishes the current breakpoint into the
+# `viewport` store and only writes when it flips, so the server re-renders on
+# a rotate/resize across the boundary and never in between.
+MOBILE_BP = 768
+
+def tune_figure(fig, is_mobile, *, height, height_mobile, top=64, top_mobile=None):
+    """Second pass over a styled figure: desktop just gets its height back,
+    narrow screens get a shorter box, tighter gutters, a left-aligned legend
+    under the title (right-anchored collides with it at 360 px), fewer ticks
+    and `dragmode=False` — plotly's default drag-zoom swallows vertical touch
+    drags, which traps the page scroll inside the chart."""
+    if not is_mobile:
+        fig.update_layout(height=height, margin_t=top)
+        return fig
+    fig.update_layout(
+        height=height_mobile,
+        # The right gutter carries both the last x tick label and the
+        # end-of-series value tag; below ~26 px one or the other clips.
+        margin=dict(t=top_mobile if top_mobile is not None else top + 12,
+                    b=28, l=36, r=26),
+        font=dict(size=11),
+        title=dict(font=dict(size=12.5)),
+        dragmode=False,
+    )
+    fig.update_xaxes(nticks=4)
+    fig.update_yaxes(nticks=5)
+    if fig.layout.showlegend is not False:
+        fig.update_layout(legend=dict(orientation="h", yanchor="bottom", y=1.0,
+                                      xanchor="left", x=0, font=dict(size=10.5)))
+    return fig
+
+def graph(figure, *, is_mobile, modebar=True):
+    """dcc.Graph with the responsive config every chart here wants. The
+    modebar is dropped on touch: it overlaps the title on a narrow chart and
+    its tools (box-select, lasso) are unusable without a pointer."""
+    return dcc.Graph(
+        figure=figure, className="wf-graph",
+        config={"displaylogo": False, "responsive": True,
+                "scrollZoom": False,
+                "displayModeBar": modebar and not is_mobile},
+    )
+
+def build_error_figure(error_df, x_min, x_max, mode_key, template, is_mobile=False):
     """Diverging error panel — warm fill above zero (over-forecast), cool
     below (under-forecast), hairline zero baseline. One logical series, so
     no legend box; the title carries the reading."""
@@ -308,14 +360,17 @@ def build_error_figure(error_df, x_min, x_max, mode_key, template):
         hovertemplate="%{y:.1f} pts<extra>under-forecast</extra>", name="under"))
     fig.update_layout(
         template=template, height=170, showlegend=False, hovermode="x",
-        title=dict(text="Forecast error (%-points · above zero = over-forecast)",
+        # The parenthetical reading doesn't fit a 360 px chart; the sign
+        # convention still shows up in the hover labels there.
+        title=dict(text="Forecast error (%-pts)" if is_mobile else
+                        "Forecast error (%-points · above zero = over-forecast)",
                    font=dict(size=13)),
         margin=dict(t=36, b=28, l=48, r=16),
         xaxis=dict(range=[x_min, x_max]),
         yaxis=dict(zeroline=True, zerolinecolor=c["baseline"], zerolinewidth=1,
                    title=None),
     )
-    return fig
+    return tune_figure(fig, is_mobile, height=170, height_mobile=145, top=36)
 
 def latest_actual_ts():
     """Timestamp of the most recent actual observation, or None. Defined
@@ -400,7 +455,7 @@ def forecast_hero():
         delta,
         html.Div(f"Peak {peak['wind_perc_pred']:.0f}% around {peak['datetime']:%a %H:%M} UTC",
                  className="wf-hero-sub"),
-    ]), className="wf-metric-card wf-hero h-100"), md=4)
+    ]), className="wf-metric-card wf-hero h-100"), xs=12, md=4)
 
 # ─── Load Metrics ────────────────────────────────────────────────────────────
 raw_metrics = safe_json(METRICS_PATH)
@@ -507,10 +562,14 @@ def delta_colour(val, base, lower_better=True):
     if worse:  return "danger",  "↑" if lower_better else "↓"
     return "warning", "="
 
-def make_card(title, value, unit, colour, tooltip=None, delta=None, md=None):
+def make_card(title, value, unit, colour, tooltip=None, delta=None, md=None, xs=6):
     """Metric tile: muted uppercase label, large proportional value, optional
     delta chip. `colour` (success/danger from delta_colour) tints only the
-    delta text — tiles stay quiet so the data reads first."""
+    delta text — tiles stay quiet so the data reads first.
+
+    `xs=6` pairs the tiles two-up on phones. Without an xs width the column
+    carries no bootstrap col class below `md` and collapses to its content
+    width, which lines all five tiles up ragged."""
     cid = str(uuid.uuid4())
     delta_cls = {"success": "good", "danger": "bad"}.get(colour, "flat")
     children = [
@@ -522,7 +581,7 @@ def make_card(title, value, unit, colour, tooltip=None, delta=None, md=None):
         children.append(html.Div(delta, className=f"wf-delta wf-delta-{delta_cls}"))
     card = dbc.Card(dbc.CardBody(children), id=cid, className="wf-metric-card h-100")
     body = [card, dbc.Tooltip(tooltip, target=cid, placement="top")] if tooltip else card
-    return dbc.Col(body, md=md)
+    return dbc.Col(body, xs=xs, md=md)
 
 # ─── Build Dash App ─────────────────────────────────────────────────────────
 # assets_folder: the stylesheet lives in the repo-root assets/, but Dash
@@ -561,7 +620,8 @@ series_dd = dcc.Dropdown(
         {"label":"Baseline (lag 48h %)", "value":"wind_perc_lag_48h"},
         {"label":"Prediction (%)",       "value":"wind_perc_pred"},
     ],
-    style={"width": "300px"}
+    # Width lives on the .wf-series-picker wrapper so a media query can widen
+    # it to 100% on phones; an inline style here would outrank that.
 )
 
 # Two single-date Mantine masked inputs (DateInput): real <input> fields that
@@ -574,7 +634,7 @@ date_picker_start = dmc.DateInput(
     minDate=min_d,
     maxDate=max_d,
     valueFormat="DD/MM/YYYY",
-    size="sm", w=150, clearable=False,
+    size="sm", w=150, clearable=False, className="wf-dateinput",
 )
 date_picker_end = dmc.DateInput(
     id="date-end",
@@ -582,7 +642,7 @@ date_picker_end = dmc.DateInput(
     minDate=min_d,
     maxDate=max_d,
     valueFormat="DD/MM/YYYY",
-    size="sm", w=150, clearable=False,
+    size="sm", w=150, clearable=False, className="wf-dateinput",
 )
 
 # Quick date filters rendered as one segmented control
@@ -604,13 +664,17 @@ app.layout = dbc.Container([
                          "CatBoost vs a 48h-persistence baseline",
                          className="wf-subtitle mt-1"),
             ]),
-        ], className="wf-brand"), width=8),
+        ], className="wf-brand"), xs=12, md=8),
         dbc.Col([
             dbc.Button("Export CSV", id="btn-export-main", size="sm", className="wf-btn me-3"),
             ThemeSwitchAIO(aio_id="theme",
                           themes=[CSS_LIGHT, CSS_DARK],
                           switch_props={"style":{"marginTop":"6px"}})
-        ], width=4, className="text-end d-flex align-items-center justify-content-end"),
+        ], xs=12, md=4,
+           # Below md the actions sit on their own row under the brand, so
+           # they left-align with it instead of hanging off the right edge.
+           className="wf-header-actions d-flex align-items-center "
+                     "justify-content-start justify-content-md-end mt-2 mt-md-0"),
     ], align="center", className="mb-3 mt-3"),
 
     html.Div(freshness_chip(), className="mb-3"),
@@ -650,11 +714,13 @@ app.layout = dbc.Container([
                 dbc.Tab(label="Forecast & Recent", tab_id="forecast_recent", className="fw-bold"),
                 dbc.Tab(label="Historical Analysis", tab_id="historical", className="fw-bold"),
             ], id="tabs", active_tab="forecast_recent", className="mb-0"),
-        ], width=8),
+        ], xs=12, md=8),
         dbc.Col([
-            html.Label("Series:", className="me-2", style={"display": "inline-block"}),
-            html.Div(series_dd, style={"display": "inline-block", "vertical-align": "middle"}),
-        ], width=4, className="text-end"),
+            html.Label("Series:", className="wf-series-label me-2"),
+            html.Div(series_dd, className="wf-series-picker"),
+        ], xs=12, md=4,
+           className="wf-series-col d-flex align-items-center "
+                     "justify-content-start justify-content-md-end mt-2 mt-md-0"),
     ], className="align-items-center mb-3"),
 
     # The date presets + range picker only drive the Historical Analysis
@@ -669,13 +735,16 @@ app.layout = dbc.Container([
             dmc.MantineProvider(
                 dbc.Row([
                     dbc.Col(html.Label("Date Range:", className="mb-0 d-flex align-items-center",
-                                       style={"height": "30px"}), width="auto"),
-                    dbc.Col(date_picker_start, width="auto"),
-                    dbc.Col(html.Span("–", className="text-secondary"), width="auto"),
-                    dbc.Col(date_picker_end, width="auto"),
+                                       style={"height": "30px"}), xs=12, md="auto"),
+                    dbc.Col(date_picker_start, xs=5, md="auto"),
+                    dbc.Col(html.Span("–", className="text-secondary"),
+                            xs=2, md="auto", className="text-center"),
+                    dbc.Col(date_picker_end, xs=5, md="auto"),
+                    # The typing hint is desktop-only — on a phone the field
+                    # opens a keyboard anyway and the row has no width to spare.
                     dbc.Col(html.Span("Type a date + Enter (or use the preset buttons above)",
                                       className="text-secondary small"),
-                            className="text-end"),
+                            md=True, className="text-end d-none d-md-block"),
                 ], align="center", className="g-2"),
                 id="mantine-provider", forceColorScheme="light",
             )
@@ -687,6 +756,13 @@ app.layout = dbc.Container([
 
     dcc.Download(id="download-data"),
 
+    # Breakpoint feed for the figure geometry (see tune_figure). The store is
+    # an Output of the clientside poll below, so on first load Dash resolves
+    # it before render_content — a phone gets mobile figures on the first
+    # paint, not after a swap.
+    dcc.Store(id="viewport", data="desktop"),
+    dcc.Interval(id="viewport-poll", interval=1200),
+
 ], fluid=True, className="dbc dbc-row-selectable", style={"maxWidth":"1400px", "paddingTop":"18px"})
 
 # ─── Callbacks ──────────────────────────────────────────────────────────────
@@ -697,9 +773,11 @@ app.layout = dbc.Container([
      Input("tabs","active_tab"),
      Input("series","value"),
      Input("date-start", "value"),
-     Input("date-end", "value")]
+     Input("date-end", "value"),
+     Input("viewport", "data")]
 )
-def render_content(theme_switch_on, active_tab, series_sel, start_d_global, end_d_global):
+def render_content(theme_switch_on, active_tab, series_sel, start_d_global, end_d_global,
+                   viewport):
     # Mantine single-date values are ISO strings; either may be None while
     # the user is mid-edit — treat missing ends as no constraint.
     dash_logger.info(f"--- render_content CALLED: active_tab={active_tab}, series_sel={series_sel}, start_d={start_d_global}, end_d={end_d_global} ---")
@@ -710,6 +788,13 @@ def render_content(theme_switch_on, active_tab, series_sel, start_d_global, end_
     mode_key = "light" if light_bg else "dark"
     template = THEME_LIGHT if light_bg else THEME_DARK
     colors = SERIES_COLORS[mode_key]
+    is_mobile = viewport == "mobile"
+    # Narrow tables get a shorter timestamp, but only the forecast tab may drop
+    # the year: its window is a few days wide, whereas the historical range can
+    # span 2018–2026 and "10 May 23:00" there is genuinely ambiguous.
+    TS_FULL = "%Y-%m-%d %H:%M"
+    ts_fmt_forecast = "%d %b %H:%M" if is_mobile else TS_FULL
+    ts_fmt_hist = "%d/%m/%y %H:%M" if is_mobile else TS_FULL
     kpi_cards_content = []
     tab_specific_content = []
 
@@ -759,13 +844,15 @@ def render_content(theme_switch_on, active_tab, series_sel, start_d_global, end_
                 labels={"variable": "", "datetime": ""},
             )
             style_series_figure(fig_fc, df_forecast_tab, series_sel, mode_key,
-                                end_labels=True, shade_forecast=True, area_actual=True)
+                                end_labels=True, shade_forecast=True, area_actual=True,
+                                compact=is_mobile)
             # Band only where the forecast is selected — it decorates the
             # prediction line, not the actuals.
             if "wind_perc_pred" in series_sel:
-                add_uncertainty_band(fig_fc, df_forecast_tab, mode_key)
-            fig_fc.update_layout(title_text="Recent actuals & day-ahead forecast",
-                                 margin=dict(t=64))
+                add_uncertainty_band(fig_fc, df_forecast_tab, mode_key, compact=is_mobile)
+            fig_fc.update_layout(title_text="Recent actuals & forecast" if is_mobile
+                                 else "Recent actuals & day-ahead forecast")
+            tune_figure(fig_fc, is_mobile, height=460, height_mobile=310, top=64)
             dash_logger.info(f"Forecast tab: plotting {len(df_forecast_tab)} rows.")
 
             # Error panel — only where actuals overlap the forecast
@@ -773,10 +860,11 @@ def render_content(theme_switch_on, active_tab, series_sel, start_d_global, end_
             error_df["prediction_error"] = error_df["wind_perc_pred"] - error_df["wind_perc"]
             error_df = error_df.dropna(subset=["prediction_error"])
             if not error_df.empty:
-                error_chart = dcc.Graph(
-                    figure=build_error_figure(error_df, df_forecast_tab.datetime.min(),
-                                              df_forecast_tab.datetime.max(), mode_key, template),
-                    config={"displayModeBar": False})
+                error_chart = graph(
+                    build_error_figure(error_df, df_forecast_tab.datetime.min(),
+                                       df_forecast_tab.datetime.max(), mode_key, template,
+                                       is_mobile),
+                    is_mobile=is_mobile, modebar=False)
             else:
                 error_chart = html.Div("No overlapping actuals to score in this window yet.",
                                        className="text-muted small py-2")
@@ -784,8 +872,9 @@ def render_content(theme_switch_on, active_tab, series_sel, start_d_global, end_
             # Numeric table at 6-hour marks
             interval_df = df_forecast_tab[df_forecast_tab.datetime.dt.hour % 6 == 0].copy()
             if not interval_df.empty:
-                interval_df = interval_df.sort_values("datetime", ascending=False).head(8)
-                interval_df["datetime"] = interval_df["datetime"].dt.strftime("%Y-%m-%d %H:%M")
+                interval_df = interval_df.sort_values("datetime", ascending=False).head(
+                    6 if is_mobile else 8)
+                interval_df["datetime"] = interval_df["datetime"].dt.strftime(ts_fmt_forecast)
                 interval_df["wind_perc"] = interval_df["wind_perc"].round(1)
                 interval_df["wind_perc_pred"] = interval_df["wind_perc_pred"].round(1)
 
@@ -822,12 +911,14 @@ def render_content(theme_switch_on, active_tab, series_sel, start_d_global, end_
                 ], className=f"wf-trend {'up' if rising else 'down'} mt-3")
 
             fig_forecast_content = html.Div([
-                dcc.Graph(figure=fig_fc, config={"displaylogo": False}),
+                graph(fig_fc, is_mobile=is_mobile),
                 error_chart,
                 dbc.Row([
-                    dbc.Col(trend_indicator, width="auto") if trend_indicator else None,
-                    dbc.Col(values_table, width=12 if not trend_indicator else None),
-                ], className="mt-2 align-items-start"),
+                    # xs=12 stacks the trend chip above the table on phones;
+                    # side by side they each got half a narrow screen.
+                    dbc.Col(trend_indicator, xs=12, md="auto") if trend_indicator else None,
+                    dbc.Col(values_table, xs=12, md=True),
+                ], className="mt-2 g-2 align-items-start"),
             ])
 
         tab_specific_content = [fig_forecast_content]
@@ -886,21 +977,24 @@ def render_content(theme_switch_on, active_tab, series_sel, start_d_global, end_
                 labels={"variable": "", "datetime": ""},
             )
             style_series_figure(fig_hist, df_plot, series_sel, mode_key,
-                                end_labels=span_days <= 45, dense=span_days > 45)
+                                end_labels=span_days <= 45, dense=span_days > 45,
+                                compact=is_mobile)
             if "wind_perc_pred" in series_sel:
-                add_uncertainty_band(fig_hist, df_plot, mode_key)
-            fig_hist.update_layout(title_text="Wind share of GB generation — history & model",
-                                   margin=dict(t=64))
+                add_uncertainty_band(fig_hist, df_plot, mode_key, compact=is_mobile)
+            fig_hist.update_layout(title_text="Wind share of GB generation" if is_mobile
+                                   else "Wind share of GB generation — history & model")
+            tune_figure(fig_hist, is_mobile, height=460, height_mobile=310, top=64)
 
             error_df = df_hist_tab.copy()
             error_df["prediction_error"] = error_df["wind_perc_pred"] - error_df["wind_perc"]
             error_df = error_df.dropna(subset=["prediction_error"])
             if not error_df.empty:
-                error_content = dcc.Graph(
-                    figure=build_error_figure(thin(error_df, ["prediction_error"]),
-                                              df_hist_tab.datetime.min(),
-                                              df_hist_tab.datetime.max(), mode_key, template),
-                    config={"displayModeBar": False})
+                error_content = graph(
+                    build_error_figure(thin(error_df, ["prediction_error"]),
+                                       df_hist_tab.datetime.min(),
+                                       df_hist_tab.datetime.max(), mode_key, template,
+                                       is_mobile),
+                    is_mobile=is_mobile, modebar=False)
 
                 # ── Error analytics: distribution + worst days ──
                 # Binned server-side: px.histogram ships every raw value and
@@ -919,6 +1013,7 @@ def render_content(theme_switch_on, active_tab, series_sel, start_d_global, end_
                     height=190, showlegend=False, bargap=0.05,
                     margin=dict(t=36, b=28, l=48, r=16),
                     xaxis=dict(title=None), yaxis=dict(title=None))
+                tune_figure(hist_fig, is_mobile, height=190, height_mobile=165, top=36)
                 hist_fig.add_vline(x=0, line_width=1, line_dash="dot",
                                    line_color=CHROME[mode_key]["muted"])
                 mean_err = float(error_df["prediction_error"].mean())
@@ -928,7 +1023,7 @@ def render_content(theme_switch_on, active_tab, series_sel, start_d_global, end_
                     x=mean_err, y=1, yref="paper", yanchor="top", xanchor="left",
                     xshift=6, yshift=-2, text=f"mean {mean_err:+.1f} pts",
                     showarrow=False, font=dict(size=11, color=CHROME[mode_key]["ink2"]))
-                error_hist_content = dcc.Graph(figure=hist_fig, config={"displayModeBar": False})
+                error_hist_content = graph(hist_fig, is_mobile=is_mobile, modebar=False)
 
                 daily = (error_df.assign(date=error_df["datetime"].dt.date)
                          .groupby("date")["prediction_error"]
@@ -936,30 +1031,33 @@ def render_content(theme_switch_on, active_tab, series_sel, start_d_global, end_
                               mean_err="mean", n="size")
                          .reset_index()
                          .sort_values("mean_abs_err", ascending=False)
-                         .head(8))
+                         .head(5 if is_mobile else 8))
                 daily["mean_abs_err"] = daily["mean_abs_err"].round(1)
                 daily["mean_err"] = daily["mean_err"].round(1)
                 worst_days_content = html.Div([
                     html.H6("Worst-forecast days (selected range)", className="mt-3"),
                     dbc.Table.from_dataframe(
                         daily[["date", "mean_abs_err", "mean_err", "n"]].rename(columns={
-                            "date": "Date", "mean_abs_err": "Mean |error| (pts)",
-                            "mean_err": "Mean error (pts)", "n": "Hours"}),
+                            "date": "Date",
+                            "mean_abs_err": "|err| (pts)" if is_mobile else "Mean |error| (pts)",
+                            "mean_err": "err (pts)" if is_mobile else "Mean error (pts)",
+                            "n": "Hours"}),
                         striped=True, hover=True, responsive=True, size="sm"),
                 ])
                 error_analytics = dbc.Row([
-                    dbc.Col(error_hist_content, md=6),
-                    dbc.Col(worst_days_content, md=6),
+                    dbc.Col(error_hist_content, xs=12, md=6),
+                    dbc.Col(worst_days_content, xs=12, md=6),
                 ], className="g-3 mt-1")
             else:
                 error_content = html.Div("No overlapping actuals in the selected range.",
                                          className="text-muted small py-2")
                 error_analytics = None
 
-            sample_interval = max(1, len(df_hist_tab) // 8)
-            interval_df = df_hist_tab.iloc[::sample_interval].head(8).copy()
+            n_rows = 6 if is_mobile else 8
+            sample_interval = max(1, len(df_hist_tab) // n_rows)
+            interval_df = df_hist_tab.iloc[::sample_interval].head(n_rows).copy()
             if not interval_df.empty:
-                interval_df["datetime"] = interval_df["datetime"].dt.strftime("%Y-%m-%d %H:%M")
+                interval_df["datetime"] = interval_df["datetime"].dt.strftime(ts_fmt_hist)
                 interval_df["wind_perc"] = interval_df["wind_perc"].round(1)
                 interval_df["wind_perc_pred"] = interval_df["wind_perc_pred"].round(1)
                 values_table = dbc.Table.from_dataframe(
@@ -971,7 +1069,7 @@ def render_content(theme_switch_on, active_tab, series_sel, start_d_global, end_
                 values_table = html.Div("No interval data available", className="text-center py-2")
 
             fig_historical_content = html.Div([
-                dcc.Graph(figure=fig_hist, config={"displaylogo": False}),
+                graph(fig_hist, is_mobile=is_mobile),
                 error_content,
                 error_analytics if error_analytics else html.Div(),
                 html.Div([html.H6("Sample data points", className="mt-3"), values_table]),
@@ -1058,6 +1156,19 @@ app.clientside_callback(
     [Output("theme-anchor", "children"),
      Output("mantine-provider", "forceColorScheme")],
     Input(ThemeSwitchAIO.ids.switch("theme"), "value"),
+)
+
+# Publish the current breakpoint. Polling (rather than a resize listener) is
+# what lets this be a plain Dash callback; returning no_update on an unchanged
+# value keeps it from re-rendering the tab every 1.2 s.
+app.clientside_callback(
+    f"""function(n, current){{
+        var bp = window.innerWidth < {MOBILE_BP} ? 'mobile' : 'desktop';
+        return bp === current ? window.dash_clientside.no_update : bp;
+    }}""",
+    Output("viewport", "data"),
+    Input("viewport-poll", "n_intervals"),
+    State("viewport", "data"),
 )
 
 # ─── Run Server ─────────────────────────────────────────────────────────────
